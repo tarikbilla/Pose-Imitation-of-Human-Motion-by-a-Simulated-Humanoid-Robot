@@ -1,0 +1,2 @@
+# Pose-Imitation-of-Human-Motion-by-a-Simulated-Humanoid-Robot
+Motions and poses of a single human are being tracked and replicated by a simulated humanoid robot.For this purpose a tripod mounted high quality camera providing a video stream of the human is to be used. A controller will process the video data to steer the motors of the humanoid robot to mimic the human in the Webots simulation environment.
