@@ -10,6 +10,8 @@
 | Date | 2026-05-05 |
 | Status | Draft |
 | Primary Tech Stack | Python, Webots, OpenCV, MediaPipe / a learned pose estimator |
+| Capture Hardware | Sony A7 III (tripod-mounted), 1920×1080 @ 25–100 FPS (adaptive) |
+| Webots Project Root | `main/` (contains `worlds/Pose-Imitation-of-Human-Motion-by-a-Simulated-Humanoid-Robot.wbt`) |
 
 ---
 
@@ -30,8 +32,9 @@ References:
 Build an end-to-end pipeline in which a simulated humanoid robot in Webots imitates the live or recorded motion of a single human, using only a single monocular video stream as input.
 
 ### 2.1 In Scope
-- Single human subject, full body in frame, tripod-mounted camera (static viewpoint).
-- Monocular RGB input (live webcam stream and/or pre-recorded video file).
+- Single human subject, full body in frame, tripod-mounted **Sony A7 III** camera (static viewpoint).
+- Monocular RGB input at **1920×1080** with an **adaptive frame rate of 25–100 FPS** depending on system resources and pipeline load.
+- Live capture (HDMI capture card / USB streaming) and/or pre-recorded video file.
 - Pose estimation in Python.
 - Retargeting of human pose to the humanoid robot's joint structure.
 - Webots controller (Python) that drives the robot's joints.
@@ -90,9 +93,16 @@ Build an end-to-end pipeline in which a simulated humanoid robot in Webots imita
 ### 5.1 Components
 
 1. **Video Input Module**
-   - Sources: live webcam (OpenCV `VideoCapture`) or video file.
-   - Configurable resolution and FPS.
-   - Provides timestamped frames to the pose estimator.
+   - Primary source: **Sony A7 III** mounted on a tripod, captured into the host PC via an HDMI-to-USB capture device (e.g., Elgato Cam Link 4K) or the camera's USB streaming mode, exposed to the OS as a UVC video device.
+   - Secondary source: pre-recorded video file (MP4/MOV) recorded with the same camera for deterministic replay.
+   - Capture parameters: **1920×1080 (Full HD)**, color, progressive scan.
+   - **Adaptive frame rate: 25–100 FPS**, automatically selected based on:
+     - measured pose-pipeline throughput (rolling average),
+     - CPU/GPU utilization,
+     - end-to-end latency budget (NFR-1).
+   - Frame-rate controller: starts at a conservative 25 FPS, ramps up toward 100 FPS while the pipeline keeps up; backs off when latency exceeds the budget or frames are being dropped.
+   - Library: OpenCV `VideoCapture` (with `CAP_AVFOUNDATION` on macOS, `CAP_V4L2` on Linux).
+   - Each frame is timestamped at capture time and passed to the pose estimator.
 
 2. **Pose Estimation Module**
    - Library candidates (Python): **MediaPipe Pose**, **MMPose**, or **Ultralytics YOLOv8-Pose**.
@@ -126,7 +136,9 @@ Build an end-to-end pipeline in which a simulated humanoid robot in Webots imita
 
 | ID | Requirement |
 |---|---|
-| FR-1 | The system SHALL accept a live webcam feed and a recorded video file as input sources, selectable via configuration. |
+| FR-1 | The system SHALL accept a live feed from a Sony A7 III (via UVC / HDMI capture) and a recorded video file as input sources, selectable via configuration. |
+| FR-1a | The system SHALL capture video at 1920×1080 resolution. |
+| FR-1b | The system SHALL operate at an adaptive frame rate between 25 FPS and 100 FPS, automatically scaling based on pipeline throughput and latency. |
 | FR-2 | The system SHALL extract human body keypoints from each input frame. |
 | FR-3 | The system SHALL map estimated keypoints to the simulated humanoid's joint space. |
 | FR-4 | The Webots controller SHALL command the humanoid's motors to follow the mapped joint trajectory each simulation step. |
@@ -143,7 +155,7 @@ Build an end-to-end pipeline in which a simulated humanoid robot in Webots imita
 | ID | Requirement | Target |
 |---|---|---|
 | NFR-1 | End-to-end latency (camera frame → joint command) | ≤ 150 ms (goal), ≤ 300 ms (acceptable) |
-| NFR-2 | Pose pipeline throughput | ≥ 20 FPS on a modern laptop CPU/GPU |
+| NFR-2 | Pose pipeline throughput | ≥ 25 FPS sustained (lower bound), target 60+ FPS, up to 100 FPS when resources allow |
 | NFR-3 | Imitation fidelity (upper body, MAE per joint) | ≤ 10° on representative test motions |
 | NFR-4 | Robot stability | No falls during standing upper-body imitation in baseline scenario |
 | NFR-5 | Reproducibility | Fixed random seeds; pinned dependency versions |
@@ -154,7 +166,8 @@ Build an end-to-end pipeline in which a simulated humanoid robot in Webots imita
 
 ## 8. Tooling & Dependencies
 
-- **Simulator:** Webots R2023b+ (existing world: `main/worlds/Pose-Imitation-of-Human-Motion-by-a-Simulated-Humanoid-Robot.wbt`).
+- **Simulator:** Webots R2023b+. The `main/` directory is the Webots project root (contains `worlds/Pose-Imitation-of-Human-Motion-by-a-Simulated-Humanoid-Robot.wbt`, plus `controllers/`, `protos/`, `plugins/` as needed). Webots is launched against this project directory.
+- **Capture hardware:** Sony A7 III (tripod-mounted) + HDMI-to-USB capture device (UVC) or USB streaming, providing 1920×1080 @ 25–100 FPS to the host.
 - **Language:** Python 3.10+.
 - **Key libraries:** `opencv-python`, `mediapipe` (or `ultralytics`), `numpy`, `scipy`, `pyyaml`, `matplotlib` (analysis), `pytest`.
 - **Webots API:** `controller` Python module shipped with Webots.
@@ -169,15 +182,17 @@ Build an end-to-end pipeline in which a simulated humanoid robot in Webots imita
 ├── docs/
 │   ├── CSPM 2026S Stahl Project.pdf
 │   └── PRD.md
-├── main/
-│   └── worlds/
-│       └── Pose-Imitation-of-Human-Motion-by-a-Simulated-Humanoid-Robot.wbt
+├── main/                       # Webots project root
+│   ├── worlds/
+│   │   └── Pose-Imitation-of-Human-Motion-by-a-Simulated-Humanoid-Robot.wbt
+│   ├── controllers/            # Webots Python controllers (one folder per controller)
+│   ├── protos/                 # custom PROTO models (if any)
+│   └── plugins/                # optional Webots plugins
 ├── src/
-│   ├── perception/         # camera capture + pose estimation
-│   ├── retargeting/        # keypoints -> joint angles
-│   ├── controllers/        # Webots Python controllers
-│   ├── utils/              # logging, filters, config
-│   └── run.py              # entry point
+│   ├── perception/             # camera capture (Sony A7 III) + pose estimation
+│   ├── retargeting/            # keypoints -> joint angles
+│   ├── utils/                  # logging, filters, adaptive FPS controller, config
+│   └── run.py                  # entry point (launches pose pipeline + Webots)
 ├── tests/
 ├── configs/
 │   └── default.yaml
@@ -211,6 +226,8 @@ Build an end-to-end pipeline in which a simulated humanoid robot in Webots imita
 | Latency too high for real-time feel. | Poor UX. | Run pose estimation in a separate process; downscale frames; use GPU model. |
 | Webots humanoid model joint structure differs from human skeleton. | Mapping errors. | Build an explicit, documented mapping table; validate per-joint with test motions. |
 | Library/version drift (Webots, MediaPipe). | Reproducibility issues. | Pin versions in `requirements.txt`; document Webots release. |
+| Sony A7 III capture chain (HDMI/UVC) introduces extra latency or frame drops. | Higher end-to-end latency, jitter. | Benchmark capture latency; prefer hardware capture device with low-latency UVC mode; expose driver settings in config. |
+| Sustaining 100 FPS not feasible on target hardware. | Underutilized capture rate. | Adaptive FPS controller (FR-1b) gracefully downscales toward 25 FPS without breaking the pipeline. |
 
 ---
 
