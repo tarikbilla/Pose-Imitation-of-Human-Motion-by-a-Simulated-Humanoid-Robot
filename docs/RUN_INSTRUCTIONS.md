@@ -112,7 +112,7 @@ git pull
 With the conda env active:
 
 ```bash
-conda activate y313
+conda activate py313
 python -m pip install --upgrade pip wheel
 pip install -r requirements.txt
 ```
