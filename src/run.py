@@ -56,6 +56,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     config = load_config(config_path)
+    # Early sanity check: MediaPipe is not compatible with Python 3.13+.
+    # If the user intends to use MediaPipe on an unsupported Python version,
+    # provide a clear error explaining options.
+    py_ver = sys.version_info
+    pose_cfg = config.get("pose", {})
+    use_mediapipe = bool(pose_cfg.get("use_mediapipe", True))
+    allow_fallback = bool(pose_cfg.get("allow_synthetic_fallback", False))
+    if py_ver >= (3, 13) and use_mediapipe and not allow_fallback:
+        log.error(
+            "Detected Python %d.%d with MediaPipe enabled and no synthetic fallback.\n"
+            "MediaPipe is not compatible with Python 3.13+.\n"
+            "Options: use Python 3.10-3.12, set `pose.allow_synthetic_fallback: true` in %s, or set `pose.use_mediapipe: false`.",
+            py_ver.major, py_ver.minor, config_path,
+        )
+        return 3
     options = PipelineOptions(
         config=config,
         show_window=not args.no_display,

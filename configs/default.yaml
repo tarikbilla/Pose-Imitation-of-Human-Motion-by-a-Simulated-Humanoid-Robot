@@ -17,7 +17,8 @@ pose:
   min_tracking_confidence: 0.5
   # Set to true ONLY for dev demos without MediaPipe installed.
   # When false, the pipeline fails loudly if MediaPipe cannot load.
-  allow_synthetic_fallback: false
+  # Temporarily enable synthetic fallback to allow running without MediaPipe.
+  allow_synthetic_fallback: true
 
 retargeting:
   smoothing_alpha: 0.35

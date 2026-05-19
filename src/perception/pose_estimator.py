@@ -61,7 +61,25 @@ class PoseEstimator:
             raise PoseEstimatorError(msg) from exc
 
         try:
+            # Access the official MediaPipe solutions API. Some binary builds
+            # or incompatible wheels (e.g. for Python 3.13) may import but not
+            # expose `solutions` — provide a clearer error in that case.
             self._mp_pose = mp.solutions.pose
+        except AttributeError as exc:
+            msg = (
+                "Imported `mediapipe` module does not expose `solutions` (mp.solutions).\n"
+                "This commonly happens when MediaPipe is not compatible with the current Python\n"
+                "version (MediaPipe supports Python 3.10-3.12). See docs/RUN_INSTRUCTIONS.md\n"
+                "for guidance.\nOriginal error: {}".format(exc)
+            )
+            if self.allow_synthetic_fallback:
+                logger.error(msg)
+                self._warn_about_fallback("MediaPipe missing `solutions` attribute")
+                self._pose = None
+                return
+            raise PoseEstimatorError(msg) from exc
+
+        try:
             self._pose = self._mp_pose.Pose(
                 static_image_mode=False,
                 model_complexity=self.model_complexity,
