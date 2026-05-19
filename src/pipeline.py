@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Deque, Optional
 
+import cv2
+
 from src.perception.pose_estimator import PoseEstimator
 from src.perception.video_input import VideoSource
 from src.perception.visualizer import SkeletonOverlay
@@ -67,7 +69,19 @@ class PoseImitationPipeline:
             height=int(cfg.get("input.height", 720)),
             preferred_fps=fps_controller.current_fps,
         )
-        estimator = PoseEstimator(use_mediapipe=bool(cfg.get("pose.use_mediapipe", True)))
+        estimator = PoseEstimator(
+            use_mediapipe=bool(cfg.get("pose.use_mediapipe", True)),
+            model_complexity=int(cfg.get("pose.model_complexity", 1)),
+            min_detection_confidence=float(cfg.get("pose.min_detection_confidence", 0.5)),
+            min_tracking_confidence=float(cfg.get("pose.min_tracking_confidence", 0.5)),
+            allow_synthetic_fallback=bool(cfg.get("pose.allow_synthetic_fallback", False)),
+        )
+        if estimator.is_real:
+            logger.info("Pose estimator: MediaPipe (real human tracking active).")
+        else:
+            logger.warning("Pose estimator: SYNTHETIC fallback (will NOT follow the human).")
+
+        flip_horizontal = bool(cfg.get("input.flip_horizontal", True))
         mapper = RetargetingMapper(joint_limits=default_joint_limits())
         smoother = ExponentialSmoother(alpha=float(cfg.get("retargeting.smoothing_alpha", 0.35)))
         overlay = SkeletonOverlay(show=self.options.show_window)
@@ -101,7 +115,8 @@ class PoseImitationPipeline:
                     break
 
                 start = time.perf_counter()
-                pose = estimator.estimate(frame.image_bgr, frame.timestamp_s, frame.frame_index)
+                image = cv2.flip(frame.image_bgr, 1) if flip_horizontal else frame.image_bgr
+                pose = estimator.estimate(image, frame.timestamp_s, frame.frame_index)
                 run_logger.log_pose(pose)
 
                 command = mapper.map_pose(pose)
@@ -123,12 +138,14 @@ class PoseImitationPipeline:
                 effective_fps = 1000.0 / max(avg_latency, 1e-3)
 
                 if self.options.show_window:
+                    n_joints = len(command.joint_angles_rad) if command else 0
                     hud = [
                         f"Target FPS: {fps_controller.current_fps:5.1f}",
-                        f"Joints: {len(command.joint_angles_rad)}",
+                        f"Joints: {n_joints}",
+                        "Source: MediaPipe" if estimator.is_real else "Source: SYNTHETIC",
                     ]
                     canvas = overlay.draw(
-                        frame.image_bgr, pose,
+                        image, pose,
                         fps=effective_fps,
                         latency_ms=avg_latency,
                         extra_hud=hud,
@@ -145,6 +162,7 @@ class PoseImitationPipeline:
             exit_code = 1
         finally:
             capture.release()
+            estimator.close()
             run_logger.close()
             overlay.close()
             if bridge is not None:

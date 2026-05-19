@@ -6,9 +6,18 @@ input:
   source: 0
   width: 1280
   height: 720
+  # Mirror the camera horizontally so the skeleton tracks selfie-style.
+  flip_horizontal: true
 
 pose:
   use_mediapipe: true
+  # 0 = lite (fastest), 1 = full (balanced), 2 = heavy (most accurate, slowest).
+  model_complexity: 1
+  min_detection_confidence: 0.5
+  min_tracking_confidence: 0.5
+  # Set to true ONLY for dev demos without MediaPipe installed.
+  # When false, the pipeline fails loudly if MediaPipe cannot load.
+  allow_synthetic_fallback: false
 
 retargeting:
   smoothing_alpha: 0.35

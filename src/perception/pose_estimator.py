@@ -1,8 +1,16 @@
+"""MediaPipe-based human pose estimator.
+
+Design goals:
+- Loud, explicit failures (no silent fallback) when MediaPipe cannot load.
+- Optional synthetic fallback only when explicitly enabled in config.
+- Returns canonical 33-landmark `PoseFrame` per frame, with visibility scores.
+"""
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 import cv2
 import numpy as np
@@ -10,40 +18,96 @@ import numpy as np
 from src.perception.landmarks import MEDIAPIPE_POSE_LANDMARKS
 from src.types import Keypoint, PoseFrame
 
+logger = logging.getLogger(__name__)
+
+
+class PoseEstimatorError(RuntimeError):
+    """Raised when MediaPipe cannot be initialised and fallback is disabled."""
+
 
 @dataclass
 class PoseEstimator:
+    """Wraps MediaPipe Pose with cross-platform initialisation and robust logging."""
+
     use_mediapipe: bool = True
+    model_complexity: int = 1            # 0=lite, 1=full, 2=heavy
+    min_detection_confidence: float = 0.5
+    min_tracking_confidence: float = 0.5
+    smooth_landmarks: bool = True
+    allow_synthetic_fallback: bool = False
 
     def __post_init__(self) -> None:
         self._mp_pose = None
         self._pose = None
-        if self.use_mediapipe:
-            try:
-                import mediapipe as mp  # type: ignore
 
-                self._mp_pose = mp.solutions.pose
-                self._pose = self._mp_pose.Pose(
-                    static_image_mode=False,
-                    model_complexity=1,
-                    smooth_landmarks=True,
-                    min_detection_confidence=0.5,
-                    min_tracking_confidence=0.5,
-                )
-            except Exception:
+        if not self.use_mediapipe:
+            self._warn_about_fallback("pose.use_mediapipe is False")
+            return
+
+        try:
+            import mediapipe as mp  # type: ignore
+        except ImportError as exc:
+            msg = (
+                "MediaPipe is not installed. Install with:\n"
+                "    pip install 'mediapipe>=0.10.14'\n"
+                "If you are on Python 3.13+, downgrade to Python 3.10–3.12 or use\n"
+                "    pip install --pre mediapipe\n"
+                f"Original error: {exc}"
+            )
+            if self.allow_synthetic_fallback:
+                logger.error(msg)
+                self._warn_about_fallback("MediaPipe import failed")
+                return
+            raise PoseEstimatorError(msg) from exc
+
+        try:
+            self._mp_pose = mp.solutions.pose
+            self._pose = self._mp_pose.Pose(
+                static_image_mode=False,
+                model_complexity=self.model_complexity,
+                smooth_landmarks=self.smooth_landmarks,
+                enable_segmentation=False,
+                min_detection_confidence=self.min_detection_confidence,
+                min_tracking_confidence=self.min_tracking_confidence,
+            )
+            logger.info(
+                "MediaPipe Pose initialised (complexity=%d, det=%.2f, trk=%.2f).",
+                self.model_complexity,
+                self.min_detection_confidence,
+                self.min_tracking_confidence,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if self.allow_synthetic_fallback:
+                logger.exception("MediaPipe Pose() init failed; using synthetic fallback.")
                 self._pose = None
+                return
+            raise PoseEstimatorError(f"MediaPipe Pose init failed: {exc}") from exc
 
-    def estimate(self, image_bgr: np.ndarray, timestamp_s: float, frame_index: int) -> PoseFrame:
+    # ------------------------------------------------------------------ public
+
+    @property
+    def is_real(self) -> bool:
+        """True if the real MediaPipe model is active (not the synthetic fallback)."""
+        return self._pose is not None
+
+    def estimate(
+        self,
+        image_bgr: np.ndarray,
+        timestamp_s: float,
+        frame_index: int,
+    ) -> PoseFrame:
         if self._pose is None:
             return self._estimate_fallback(image_bgr, timestamp_s, frame_index)
 
+        # MediaPipe requires an RGB, contiguous, writeable=False array for speed.
         rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
         result = self._pose.process(rgb)
+
         if not result.pose_landmarks:
             return PoseFrame(timestamp_s=timestamp_s, keypoints={}, frame_index=frame_index)
 
         landmarks = result.pose_landmarks.landmark
-        # MediaPipe always returns 33 landmarks in canonical order; map by index.
         keypoints: Dict[str, Keypoint] = {}
         for idx, name in enumerate(MEDIAPIPE_POSE_LANDMARKS):
             lm = landmarks[idx]
@@ -55,7 +119,29 @@ class PoseEstimator:
             )
         return PoseFrame(timestamp_s=timestamp_s, keypoints=keypoints, frame_index=frame_index)
 
-    def _estimate_fallback(self, image_bgr: np.ndarray, timestamp_s: float, frame_index: int) -> PoseFrame:
+    def close(self) -> None:
+        if self._pose is not None:
+            try:
+                self._pose.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._pose = None
+
+    # ----------------------------------------------------------------- helpers
+
+    def _warn_about_fallback(self, reason: str) -> None:
+        logger.warning(
+            "Using SYNTHETIC pose fallback (%s). The skeleton will NOT follow the "
+            "human; install MediaPipe to enable real pose tracking.",
+            reason,
+        )
+
+    def _estimate_fallback(
+        self,
+        image_bgr: np.ndarray,
+        timestamp_s: float,
+        frame_index: int,
+    ) -> PoseFrame:
         """Synthetic deterministic pose generator for environments without MediaPipe."""
         t = frame_index / 20.0
         cx, cy = 0.5, 0.45

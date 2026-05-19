@@ -13,19 +13,27 @@ A Linux-first, real-time pipeline that:
 
 ---
 
-## Quickstart (Ubuntu)
+## Quickstart (Ubuntu + Conda)
 
 ```bash
+# 1. Activate the conda environment (create it first if needed):
+#    conda create -n y313 python=3.11 -y
+conda activate y313
+
+# 2. Clone or pull
 git clone https://github.com/tarikbilla/Pose-Imitation-of-Human-Motion-by-a-Simulated-Humanoid-Robot.git
 cd Pose-Imitation-of-Human-Motion-by-a-Simulated-Humanoid-Robot
-bash scripts/setup_ubuntu.sh
-source .venv/bin/activate
 
-# Camera-only demo (no Webots required) — shows live skeleton overlay:
+# 3. Install dependencies into the conda env
+pip install -r requirements.txt
+
+# 4. Camera-only demo (no Webots required) — shows live skeleton overlay:
 python run.py --no-webots
 ```
 
 Press **`q`** or **`ESC`** in the window to quit.
+
+> Full setup guide: [`docs/RUN_INSTRUCTIONS.md`](docs/RUN_INSTRUCTIONS.md)
 
 ---
 
