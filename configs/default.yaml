@@ -1,0 +1,30 @@
+# Pipeline runtime configuration.
+# All keys are optional; defaults live in the Python code.
+
+input:
+  # 0 = first webcam on Linux/macOS. Use a file path like "data/sample.mp4" to replay.
+  source: 0
+  width: 1280
+  height: 720
+
+pose:
+  use_mediapipe: true
+
+retargeting:
+  smoothing_alpha: 0.35
+
+runtime:
+  initial_fps: 30
+  min_fps: 25
+  max_fps: 100
+  fps_step: 5
+  latency_budget_ms: 150
+  max_frames: 0   # 0 = unlimited
+
+webots_bridge:
+  enabled: true
+  host: 127.0.0.1
+  port: 8765
+
+logging:
+  output_dir: logs

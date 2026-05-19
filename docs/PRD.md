@@ -109,6 +109,29 @@ Build an end-to-end pipeline in which a simulated humanoid robot in Webots imita
    - Output: per-frame keypoints (33 landmarks for MediaPipe) with 3D world coordinates and visibility.
    - Smoothing: One-Euro filter or exponential smoothing to reduce jitter.
 
+   #### 5.1.2 MediaPipe Pose Landmark Set (33 landmarks)
+
+   The system SHALL consume all 33 MediaPipe Pose landmarks. Each landmark provides `(x, y, z, visibility)` where `x, y` are normalized image coordinates, `z` is depth relative to the hips (in normalized units), and `visibility ∈ [0, 1]`.
+
+   | ID | Name | ID | Name | ID | Name |
+   |----|------|----|------|----|------|
+   | 0  | nose                | 11 | left_shoulder        | 22 | right_thumb          |
+   | 1  | left_eye_inner      | 12 | right_shoulder       | 23 | left_hip             |
+   | 2  | left_eye            | 13 | left_elbow           | 24 | right_hip            |
+   | 3  | left_eye_outer      | 14 | right_elbow          | 25 | left_knee            |
+   | 4  | right_eye_inner     | 15 | left_wrist           | 26 | right_knee           |
+   | 5  | right_eye           | 16 | right_wrist          | 27 | left_ankle           |
+   | 6  | right_eye_outer     | 17 | left_pinky           | 28 | right_ankle          |
+   | 7  | left_ear            | 18 | right_pinky          | 29 | left_heel            |
+   | 8  | right_ear           | 19 | left_index           | 30 | right_heel           |
+   | 9  | mouth_left          | 20 | right_index          | 31 | left_foot_index      |
+   | 10 | mouth_right         | 21 | left_thumb           | 32 | right_foot_index     |
+
+   Notes:
+   - Reference figure: `docs/` (MediaPipe Pose skeleton diagram).
+   - Naming follows MediaPipe’s `mp.solutions.pose.PoseLandmark` enum (uppercase form, e.g. `LEFT_SHOULDER`).
+   - The retargeting module currently uses a curated subset relevant to humanoid joints (shoulders, elbows, wrists, hips, knees, ankles, head reference). The remaining landmarks (face, fingers, feet indices) are still **logged** for downstream metrics, gesture extensions, and future work.
+
 3. **Retargeting Module**
    - Convert human keypoints into joint angles compatible with the Webots humanoid (e.g., NAO, Atlas, or a custom URDF/PROTO).
    - Approach:

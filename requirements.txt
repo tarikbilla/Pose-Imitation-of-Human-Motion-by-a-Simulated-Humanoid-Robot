@@ -1,0 +1,14 @@
+# Runtime dependencies (Python 3.10 - 3.12 supported by mediapipe)
+numpy>=1.26,<2.1
+opencv-python>=4.9,<5.0
+PyYAML>=6.0,<7.0
+mediapipe>=0.10.14,<0.11
+scipy>=1.11,<2.0
+
+# Analysis / plotting
+matplotlib>=3.8,<4.0
+
+# Dev tooling
+pytest>=8.0,<9.0
+ruff>=0.6,<1.0
+black>=24.0,<25.0
