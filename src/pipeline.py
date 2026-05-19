@@ -77,9 +77,13 @@ class PoseImitationPipeline:
             allow_synthetic_fallback=bool(cfg.get("pose.allow_synthetic_fallback", False)),
         )
         if estimator.is_real:
-            logger.info("Pose estimator: MediaPipe (real human tracking active).")
+            logger.info(
+                "Pose estimator: MediaPipe (real human tracking active). "
+                "Detection threshold: %.2f, Tracking threshold: %.2f",
+                estimator.min_detection_confidence, estimator.min_tracking_confidence
+            )
         else:
-            logger.warning("Pose estimator: SYNTHETIC fallback (will NOT follow the human).")
+            logger.error("Pose estimator: SYNTHETIC fallback (will NOT follow the human). This is a fallback mode.")
 
         flip_horizontal = bool(cfg.get("input.flip_horizontal", True))
         mapper = RetargetingMapper(joint_limits=default_joint_limits())
@@ -139,9 +143,10 @@ class PoseImitationPipeline:
 
                 if self.options.show_window:
                     n_joints = len(command.joint_angles_rad) if command else 0
+                    visible_landmarks = sum(1 for kp in pose.keypoints.values() if kp.visibility > 0.3)
                     hud = [
                         f"Target FPS: {fps_controller.current_fps:5.1f}",
-                        f"Joints: {n_joints}",
+                        f"Joints: {n_joints}   Visible: {visible_landmarks}/33",
                         "Source: MediaPipe" if estimator.is_real else "Source: SYNTHETIC",
                     ]
                     canvas = overlay.draw(

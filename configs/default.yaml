@@ -13,12 +13,12 @@ pose:
   use_mediapipe: true
   # 0 = lite (fastest), 1 = full (balanced), 2 = heavy (most accurate, slowest).
   model_complexity: 1
-  min_detection_confidence: 0.5
-  min_tracking_confidence: 0.5
-  # Set to true ONLY for dev demos without MediaPipe installed.
-  # When false, the pipeline fails loudly if MediaPipe cannot load.
-  # Temporarily enable synthetic fallback to allow running without MediaPipe.
-  allow_synthetic_fallback: true
+  # Lowered thresholds for more robust detection in real-time scenarios
+  min_detection_confidence: 0.35
+  min_tracking_confidence: 0.35
+  # MUST be false to enable real human detection via MediaPipe.
+  # When true, uses synthetic fallback with fixed landmarks (not tracking humans).
+  allow_synthetic_fallback: false
 
 retargeting:
   smoothing_alpha: 0.35

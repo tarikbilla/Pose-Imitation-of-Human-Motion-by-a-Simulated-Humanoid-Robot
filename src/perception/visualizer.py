@@ -60,7 +60,7 @@ POSE_CONNECTIONS: Tuple[Tuple[str, str], ...] = (
 LANDMARK_COLOR = (0, 200, 255)   # cyan-orange landmarks
 SKELETON_COLOR = (255, 255, 255) # white bones
 HUD_COLOR = (50, 220, 50)        # green HUD
-LOW_VIS_THRESHOLD = 0.4
+LOW_VIS_THRESHOLD = 0.3          # Lowered threshold to show more detected landmarks
 
 
 class SkeletonOverlay:
@@ -122,7 +122,9 @@ class SkeletonOverlay:
     ) -> None:
         detected = sum(1 for kp in pose.keypoints.values() if kp.visibility >= LOW_VIS_THRESHOLD)
         total = len(MEDIAPIPE_POSE_LANDMARKS)
-        status = "HUMAN DETECTED" if detected > total * 0.3 else "NO HUMAN"
+        # Consider human detected if we see 20% or more of the body
+        has_human = detected >= total * 0.2 and len(pose.keypoints) > 0
+        status = "✓ HUMAN DETECTED" if has_human else "✗ NO HUMAN DETECTED"
         lines = [
             f"FPS: {fps:5.1f}   Latency: {latency_ms:5.1f} ms",
             f"Frame: {pose.frame_index}   Landmarks: {detected}/{total}",

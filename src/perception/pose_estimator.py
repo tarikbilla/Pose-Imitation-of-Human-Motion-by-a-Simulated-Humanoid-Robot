@@ -123,6 +123,7 @@ class PoseEstimator:
         result = self._pose.process(rgb)
 
         if not result.pose_landmarks:
+            logger.debug("Frame %d: No human detected by MediaPipe", frame_index)
             return PoseFrame(timestamp_s=timestamp_s, keypoints={}, frame_index=frame_index)
 
         landmarks = result.pose_landmarks.landmark
@@ -135,6 +136,14 @@ class PoseEstimator:
                 z=float(lm.z),
                 visibility=float(lm.visibility),
             )
+        
+        # Log detection status with landmark visibility stats
+        visible_count = sum(1 for kp in keypoints.values() if kp.visibility > 0.3)
+        logger.debug(
+            "Frame %d: Human detected with %d/%d visible landmarks (>0.3 threshold)",
+            frame_index, visible_count, len(keypoints)
+        )
+        
         return PoseFrame(timestamp_s=timestamp_s, keypoints=keypoints, frame_index=frame_index)
 
     def close(self) -> None:
