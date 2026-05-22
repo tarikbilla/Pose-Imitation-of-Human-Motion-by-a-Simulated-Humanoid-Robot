@@ -24,9 +24,8 @@ except ImportError:
     sys.exit(1)
 
 # Import utilities (adjust path as needed for Webots environment)
-import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'libraries'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'libraries'))
 
 try:
     from pose_control_utils import (
@@ -145,8 +144,8 @@ class AdvancedPoseController:
             # Calculate smooth velocity
             angle_diff = target_angle - current
             timestep_s = self.timestep / 1000.0
-            velocity = angle_diff / max(timestep_s, 0.001)
-            velocity = max(-2.0, min(2.0, velocity))  # Limit velocity
+            velocity = abs(angle_diff / max(timestep_s, 0.001))
+            velocity = min(2.0, velocity)  # Limit velocity
             
             # Apply to motor
             motor.setPosition(target_angle)

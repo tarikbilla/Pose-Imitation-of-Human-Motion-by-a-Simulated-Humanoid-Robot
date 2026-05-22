@@ -49,7 +49,7 @@ logging.basicConfig(
 logger = logging.getLogger("PoseController")
 
 
-class PoseImiationController:
+class PoseImitationController:
     """Real-time pose imitation controller for Webots humanoid robot."""
 
     def __init__(self) -> None:
@@ -130,8 +130,6 @@ class PoseImiationController:
             # Calculate velocity for smooth motion
             angle_diff = target_angle - current
             velocity = min(MAX_VELOCITY, abs(angle_diff) / (self.timestep / 1000.0 + 1e-6))
-            if angle_diff < 0:
-                velocity = -velocity
             
             # Apply position and velocity
             motor.setPosition(target_angle)
@@ -213,7 +211,7 @@ class PoseImiationController:
 def main() -> None:
     """Entry point."""
     try:
-        controller = PoseImiationController()
+        controller = PoseImitationController()
         controller.run()
     except Exception as e:
         logger.exception(f"Fatal error: {e}")
