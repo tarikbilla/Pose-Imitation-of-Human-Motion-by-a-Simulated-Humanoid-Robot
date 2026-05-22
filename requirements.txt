@@ -1,8 +1,14 @@
+# REFERENCE ONLY: Use environment.yml instead!
+# This file is kept for documentation purposes.
+# To install dependencies, use:
+#   conda env create -f environment.yml -y
+#   conda run -n py312 pip install mediapipe==0.10.13
+
 # Runtime dependencies (Python 3.10 - 3.12 supported by mediapipe)
 numpy>=1.26,<2.1
 opencv-python>=4.9,<5.0
 PyYAML>=6.0,<7.0
-mediapipe>=0.10.14,<0.11
+mediapipe>=0.10.13,<0.11
 scipy>=1.11,<2.0
 
 # Analysis / plotting

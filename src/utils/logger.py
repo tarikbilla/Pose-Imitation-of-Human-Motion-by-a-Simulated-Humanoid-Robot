@@ -7,6 +7,26 @@ from typing import Dict, Iterable, List
 
 from src.types import JointCommand, PoseFrame
 
+# All 33 MediaPipe pose landmarks (fixed schema)
+MEDIAPIPE_POSE_LANDMARKS = [
+    "nose",
+    "left_eye_inner", "left_eye", "left_eye_outer",
+    "right_eye_inner", "right_eye", "right_eye_outer",
+    "left_ear", "right_ear",
+    "mouth_left", "mouth_right",
+    "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist",
+    "left_pinky", "right_pinky",
+    "left_index", "right_index",
+    "left_thumb", "right_thumb",
+    "left_hip", "right_hip",
+    "left_knee", "right_knee",
+    "left_ankle", "right_ankle",
+    "left_heel", "right_heel",
+    "left_foot_index", "right_foot_index",
+]
+
 
 @dataclass
 class CsvRunLogger:
@@ -19,11 +39,11 @@ class CsvRunLogger:
     def __post_init__(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
-    def _open_pose_writer(self, landmark_names: Iterable[str]) -> None:
+    def _open_pose_writer(self) -> None:
         pose_path = self.run_dir / "pose_keypoints.csv"
         self._pose_fp = pose_path.open("w", newline="", encoding="utf-8")
         fieldnames: List[str] = ["frame_index", "timestamp_s"]
-        for name in landmark_names:
+        for name in MEDIAPIPE_POSE_LANDMARKS:
             fieldnames.extend([f"{name}_x", f"{name}_y", f"{name}_z", f"{name}_visibility"])
         self._pose_writer = csv.DictWriter(self._pose_fp, fieldnames=fieldnames)
         self._pose_writer.writeheader()
@@ -37,16 +57,24 @@ class CsvRunLogger:
 
     def log_pose(self, pose: PoseFrame) -> None:
         if self._pose_writer is None:
-            self._open_pose_writer(sorted(pose.keypoints.keys()))
+            self._open_pose_writer()
         row: Dict[str, float | int] = {
             "frame_index": pose.frame_index,
             "timestamp_s": pose.timestamp_s,
         }
-        for name, keypoint in sorted(pose.keypoints.items()):
-            row[f"{name}_x"] = keypoint.x
-            row[f"{name}_y"] = keypoint.y
-            row[f"{name}_z"] = keypoint.z
-            row[f"{name}_visibility"] = keypoint.visibility
+        for name in MEDIAPIPE_POSE_LANDMARKS:
+            if name in pose.keypoints:
+                keypoint = pose.keypoints[name]
+                row[f"{name}_x"] = keypoint.x
+                row[f"{name}_y"] = keypoint.y
+                row[f"{name}_z"] = keypoint.z
+                row[f"{name}_visibility"] = keypoint.visibility
+            else:
+                # Fill missing landmarks with zeros
+                row[f"{name}_x"] = 0.0
+                row[f"{name}_y"] = 0.0
+                row[f"{name}_z"] = 0.0
+                row[f"{name}_visibility"] = 0.0
         self._pose_writer.writerow(row)
 
     def log_joint_command(self, command: JointCommand) -> None:

@@ -1,0 +1,24 @@
+name: py312
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Core Python runtime
+  - python=3.12
+  - pip  # for non-conda packages
+  # Scientific computing
+  - numpy>=1.26,<2.1
+  - scipy>=1.11,<2.0
+  - opencv>=4.9,<5.0
+  # Configuration
+  - pyyaml>=6.0,<7.0
+  # Visualization
+  - matplotlib>=3.8,<4.0
+  # Development tools
+  - pytest>=8.0,<9.0
+  - ruff>=0.6,<1.0
+  - black>=24.0,<25.0
+  # System tools
+  - git
+  - make
+# Post-install: run `conda run -n py312 pip install mediapipe==0.10.13`

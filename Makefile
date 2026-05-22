@@ -1,29 +1,47 @@
-PYTHON ?= python3.11
-VENV   ?= .venv
-ACT    := source $(VENV)/bin/activate
+CONDA_ENV ?= py312
+CONDA_RUN := conda run -n $(CONDA_ENV)
 
-.PHONY: setup run demo test lint format clean
+.PHONY: setup conda-setup run demo headless test lint format clean help
 
-setup:
-	bash scripts/setup_ubuntu.sh
+help:
+	@echo "Usage: make [target]"
+	@echo ""
+	@echo "Targets:"
+	@echo "  setup          - Alias for conda-setup (recommended)"
+	@echo "  conda-setup    - Create and configure conda environment"
+	@echo "  run            - Run full pipeline with Webots (activate env first)"
+	@echo "  demo           - Run camera-only demo (no Webots)"
+	@echo "  headless       - Run headless for 100 frames (no camera window)"
+	@echo "  test           - Run pytest"
+	@echo "  lint           - Run ruff linter"
+	@echo "  format         - Format code with black and ruff"
+	@echo "  clean          - Remove artifacts and caches"
+	@echo ""
+	@echo "Conda environment: $(CONDA_ENV)"
+	@echo "Activate with: conda activate $(CONDA_ENV)"
+
+setup: conda-setup
+
+conda-setup:
+	bash scripts/setup_conda.sh
 
 run:
-	$(ACT) && python run.py
+	$(CONDA_RUN) python run.py
 
 demo:
-	$(ACT) && python run.py --no-webots
+	$(CONDA_RUN) python run.py --no-webots
 
 headless:
-	$(ACT) && python run.py --no-webots --no-display --max-frames 100
+	$(CONDA_RUN) python run.py --no-webots --no-display --max-frames 100
 
 test:
-	$(ACT) && pytest
+	$(CONDA_RUN) pytest
 
 lint:
-	$(ACT) && ruff check src tests
+	$(CONDA_RUN) ruff check src tests
 
 format:
-	$(ACT) && black src tests && ruff check --fix src tests
+	$(CONDA_RUN) black src tests && $(CONDA_RUN) ruff check --fix src tests
 
 clean:
 	rm -rf logs __pycache__ .pytest_cache .ruff_cache

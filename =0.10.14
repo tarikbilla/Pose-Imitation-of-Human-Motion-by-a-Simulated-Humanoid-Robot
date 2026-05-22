@@ -1,0 +1,2 @@
+/home/CSPM26/miniconda3/envs/py312/bin/python: No module named pip
+ERROR conda.cli.main_run:execute(148): `conda run python -m pip install mediapipe --no-deps` failed. (See above for error)
