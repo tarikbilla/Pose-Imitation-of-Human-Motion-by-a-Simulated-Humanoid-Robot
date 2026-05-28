@@ -125,6 +125,9 @@ python run.py --no-display --no-webots
 python run.py
 ```
 
+> Note: the current Webots controller focuses on safe upper-body imitation.
+> Lower-body joints (`LHipPitch`, `RHipPitch`, `TorsoPitch`) are ignored to keep the robot upright until full balance and ankle control are implemented.
+
 ### 4.5 Optional flags
 - `--source 0` — use webcam index 0  
 - `--max-frames 300` — stop after 300 frames

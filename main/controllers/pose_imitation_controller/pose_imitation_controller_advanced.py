@@ -46,10 +46,9 @@ MOTOR_NAMES = [
     "RShoulderPitch",
     "LElbowRoll",
     "RElbowRoll",
-    "LHipPitch",
-    "RHipPitch",
-    "TorsoPitch",
 ]
+
+IGNORED_JOINTS = {"LHipPitch", "RHipPitch", "TorsoPitch"}
 
 # Setup logging
 logging.basicConfig(
@@ -127,6 +126,9 @@ class AdvancedPoseController:
         """Apply a pose frame to all motors. Returns number of joints applied."""
         count = 0
         for joint_name, target_angle in angles.items():
+            if joint_name in IGNORED_JOINTS:
+                logger.debug(f"Ignoring lower-body joint for stability: {joint_name}")
+                continue
             if joint_name not in self.motors:
                 logger.warning(f"Unknown joint: {joint_name}")
                 continue

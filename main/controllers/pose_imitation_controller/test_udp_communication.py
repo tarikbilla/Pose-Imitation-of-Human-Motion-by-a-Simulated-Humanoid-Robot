@@ -109,9 +109,6 @@ def test_send_dummy_command(host: str = "127.0.0.1", port: int = 8765) -> None:
             "RShoulderPitch": -0.5,
             "LElbowRoll": 0.8,
             "RElbowRoll": -0.8,
-            "LHipPitch": 0.0,
-            "RHipPitch": 0.0,
-            "TorsoPitch": 0.1,
         }
     }
     

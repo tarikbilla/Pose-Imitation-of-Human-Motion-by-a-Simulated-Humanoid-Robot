@@ -29,16 +29,17 @@ UDP_TIMEOUT = 1.0  # seconds
 MAX_VELOCITY = 2.0  # rad/s - smooth but responsive
 POSITION_TOLERANCE = 0.01  # rad - acceptable position error
 
-# Motor names mapped from human pose to robot joints
+# Motor names mapped from human pose to robot joints.
+# We limit control to upper-body joints for stability in the current Nao setup.
 MOTOR_NAMES = [
     "LShoulderPitch",
     "RShoulderPitch",
     "LElbowRoll",
     "RElbowRoll",
-    "LHipPitch",
-    "RHipPitch",
-    "TorsoPitch",  # Added torso control
 ]
+
+# Lower-body joints are intentionally excluded until knee/ankle balance control is implemented.
+IGNORED_JOINTS = {"LHipPitch", "RHipPitch", "TorsoPitch"}
 
 # Setup logging
 logging.basicConfig(
@@ -116,21 +117,24 @@ class PoseImitationController:
     def _update_motor_positions(self, angles: Dict[str, float]) -> None:
         """Apply joint angles to motors with velocity limits."""
         for joint_name, target_angle in angles.items():
+            if joint_name in IGNORED_JOINTS:
+                logger.debug(f"Ignoring lower-body joint for stability: {joint_name}")
+                continue
             if joint_name not in self.motors:
                 logger.warning(f"Unknown joint: {joint_name}")
                 continue
-            
+
             motor = self.motors[joint_name]
             current = self.current_positions.get(joint_name, 0.0)
-            
+
             # Clamp target angle to reasonable bounds
             target_angle = float(target_angle)
             self.target_positions[joint_name] = target_angle
-            
+
             # Calculate velocity for smooth motion
             angle_diff = target_angle - current
             velocity = min(MAX_VELOCITY, abs(angle_diff) / (self.timestep / 1000.0 + 1e-6))
-            
+
             # Apply position and velocity
             motor.setPosition(target_angle)
             motor.setVelocity(velocity)
