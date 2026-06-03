@@ -1,4 +1,4 @@
-# Pose Imitation of Human Motion by a Simulated Humanoid Robot
+# Pose Imitation of Human Motion by a Simulated Humanoid Robot 
 
 A Linux-first, real-time pipeline that:
 
