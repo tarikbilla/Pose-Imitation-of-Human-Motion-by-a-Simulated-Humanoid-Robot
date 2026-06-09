@@ -1,17 +1,26 @@
 """
-Real-time Webots pose imitation controller.
+Real-time Webots NAO pose imitation controller.
 
-Receives human pose commands via UDP from the Python pipeline and controls
-the simulated humanoid robot in real-time. Features:
-- Smooth joint position control with velocity limits
-- Position feedback and validation
-- Graceful error handling
-- Frame-by-frame tracking synchronization
+Receives generic human-pose joint commands via UDP from the Python pipeline
+(`src/`) and drives the simulated NAO humanoid in real time.
+
+Responsibilities (the NAO-specific mapping, smoothing, joint limiting and
+standing stabilization) live in ``pose_control_utils.NaoPoseDriver``; this file
+is just the Webots glue: open the socket, step the simulation, hand each frame
+to the driver, and shut down cleanly.
+
+Protocol (UDP, port 8765, JSON):
+    {
+      "timestamp_s": 1234567890.123,
+      "frame_index": 45,
+      "joint_angles_rad": {"LShoulderPitch": 0.5, "RElbowRoll": -1.1, ...}
+    }
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 import sys
 import time
@@ -23,202 +32,152 @@ except ImportError:
     print("Error: Webots controller module not found. Run this only in Webots.")
     sys.exit(1)
 
-# Configuration
+# Make the shared library importable regardless of Webots' working directory.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "libraries"))
+from pose_control_utils import JointTrajectoryLogger, NaoPoseDriver  # noqa: E402
+
+# --- Configuration ---------------------------------------------------------
+UDP_HOST = "127.0.0.1"
 UDP_PORT = 8765
-UDP_TIMEOUT = 1.0  # seconds
-MAX_VELOCITY = 2.0  # rad/s - smooth but responsive
-POSITION_TOLERANCE = 0.01  # rad - acceptable position error
+SOCKET_RCVBUF = 1 << 16
 
-# Motor names mapped from human pose to robot joints.
-# We limit control to upper-body joints for stability in the current Nao setup.
-MOTOR_NAMES = [
-    "LShoulderPitch",
-    "RShoulderPitch",
-    "LElbowRoll",
-    "RElbowRoll",
-]
+# Drive only the upper body for balance safety (see PRD NFR-4). Set True only
+# once a balance controller is in place.
+DRIVE_LEGS = False
+SMOOTHING_ALPHA = 0.4     # EMA factor for joint targets (0..1, higher = snappier)
+VELOCITY_SCALE = 0.5      # fraction of each joint's hardware max velocity
+STALE_AFTER_S = 0.5       # hold pose if no command for this long
 
-# Lower-body joints are intentionally excluded until knee/ankle balance control is implemented.
-IGNORED_JOINTS = {"LHipPitch", "RHipPitch", "TorsoPitch"}
+# Log commanded vs. achieved joint angles to <project>/logs/ for offline
+# imitation-fidelity metrics (PRD FR-7 / US-3).
+ENABLE_TRAJECTORY_LOG = True
+LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "logs"))
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)-7s | %(message)s",
-    datefmt="%H:%M:%S"
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("PoseController")
 
 
 class PoseImitationController:
-    """Real-time pose imitation controller for Webots humanoid robot."""
+    """Webots glue around :class:`NaoPoseDriver`."""
 
     def __init__(self) -> None:
         self.robot = Robot()
         self.timestep = int(self.robot.getBasicTimeStep())
-        self.motors: Dict[str, object] = {}
-        self.sensors: Dict[str, object] = {}
-        self.target_positions: Dict[str, float] = {}
-        self.current_positions: Dict[str, float] = {}
-        self.frame_count = 0
-        self.last_update_time = time.time()
-        
-        logger.info(f"Initializing robot controller (timestep: {self.timestep}ms)")
-        self._init_motors()
-        self._init_socket()
-        logger.info("Controller initialized successfully")
+        logger.info("Initializing NAO pose controller (timestep: %dms)", self.timestep)
 
-    def _init_motors(self) -> None:
-        """Initialize motors with velocity limits."""
-        logger.info("Setting up motors...")
-        for name in MOTOR_NAMES:
-            try:
-                motor = self.robot.getDevice(name)
-                if motor is None:
-                    logger.warning(f"Motor '{name}' not found in robot")
-                    continue
-                
-                # Configure motor for smooth control
-                motor.setVelocity(0.0)  # Start at rest
-                motor.setAcceleration(float('inf'))  # No acceleration limit
-                self.motors[name] = motor
-                self.target_positions[name] = 0.0
-                self.current_positions[name] = 0.0
-                
-                # Try to get position sensor
-                sensor_name = f"{name}::sensor"
-                sensor = self.robot.getDevice(sensor_name)
-                if sensor is not None:
-                    self.sensors[name] = sensor
-                    
-            except Exception as e:
-                logger.error(f"Error initializing motor '{name}': {e}")
-        
-        logger.info(f"Motors ready: {len(self.motors)}/{len(MOTOR_NAMES)}")
+        self.driver = NaoPoseDriver(
+            self.robot,
+            drive_legs=DRIVE_LEGS,
+            smoothing_alpha=SMOOTHING_ALPHA,
+            velocity_scale=VELOCITY_SCALE,
+            stale_after_s=STALE_AFTER_S,
+            logger=logger.info,
+        )
+        self._init_socket()
+
+        self.trajectory_log = None
+        if ENABLE_TRAJECTORY_LOG:
+            self.trajectory_log = JointTrajectoryLogger(
+                LOG_DIR, self.driver.logged_joints, logger=logger.info
+            )
+
+        self.frame_count = 0
+        self._last_log_time = time.time()
+        logger.info("Controller initialized; waiting for pose commands...")
 
     def _init_socket(self) -> None:
-        """Initialize UDP socket for receiving pose commands."""
-        logger.info(f"Opening UDP socket on port {UDP_PORT}...")
+        logger.info("Opening UDP socket on %s:%d ...", UDP_HOST, UDP_PORT)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
-        self.sock.bind(("127.0.0.1", UDP_PORT))
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_RCVBUF)
+        self.sock.bind((UDP_HOST, UDP_PORT))
         self.sock.setblocking(False)
         logger.info("UDP socket ready")
 
-    def _receive_pose_command(self) -> Optional[Dict]:
-        """Try to receive and parse a pose command via UDP."""
-        try:
-            data, _ = self.sock.recvfrom(65535)
-            payload = json.loads(data.decode("utf-8"))
-            return payload
-        except (BlockingIOError, json.JSONDecodeError, OSError):
-            return None
+    def _drain_latest_command(self) -> Optional[Dict]:
+        """Return the most recent pose command, discarding any backlog.
 
-    def _update_motor_positions(self, angles: Dict[str, float]) -> None:
-        """Apply joint angles to motors with velocity limits."""
-        for joint_name, target_angle in angles.items():
-            if joint_name in IGNORED_JOINTS:
-                logger.debug(f"Ignoring lower-body joint for stability: {joint_name}")
+        UDP can queue several frames between simulation steps. We only care
+        about the freshest pose, so we drain the buffer and keep the last one
+        (keeps end-to-end latency low — PRD NFR-1).
+        """
+        latest: Optional[Dict] = None
+        while True:
+            try:
+                data, _ = self.sock.recvfrom(SOCKET_RCVBUF)
+            except (BlockingIOError, OSError):
+                break
+            try:
+                latest = json.loads(data.decode("utf-8"))
+            except json.JSONDecodeError:
                 continue
-            if joint_name not in self.motors:
-                logger.warning(f"Unknown joint: {joint_name}")
-                continue
-
-            motor = self.motors[joint_name]
-            current = self.current_positions.get(joint_name, 0.0)
-
-            # Clamp target angle to reasonable bounds
-            target_angle = float(target_angle)
-            self.target_positions[joint_name] = target_angle
-
-            # Calculate velocity for smooth motion
-            angle_diff = target_angle - current
-            velocity = min(MAX_VELOCITY, abs(angle_diff) / (self.timestep / 1000.0 + 1e-6))
-
-            # Apply position and velocity
-            motor.setPosition(target_angle)
-            motor.setVelocity(velocity)
-
-    def _update_position_feedback(self) -> None:
-        """Read current joint positions from sensors."""
-        for joint_name in self.motors:
-            if joint_name in self.sensors:
-                try:
-                    sensor = self.sensors[joint_name]
-                    pos = sensor.getValue()
-                    self.current_positions[joint_name] = float(pos)
-                except Exception as e:
-                    logger.debug(f"Error reading sensor {joint_name}: {e}")
+        return latest
 
     def _log_status(self) -> None:
-        """Log current controller status periodically."""
-        if self.frame_count % 100 == 0:  # Log every 100 frames
-            elapsed = time.time() - self.last_update_time
-            fps = 100 / elapsed if elapsed > 0 else 0
-            active_motors = len([m for m in self.motors.values() if m is not None])
-            logger.info(
-                f"Frame {self.frame_count} | FPS: {fps:.1f} | "
-                f"Active motors: {active_motors}/{len(MOTOR_NAMES)} | "
-                f"Joints tracking: {len(self.target_positions)}"
+        if self.frame_count % 100 != 0:
+            return
+        elapsed = time.time() - self._last_log_time
+        fps = 100 / elapsed if elapsed > 0 else 0.0
+        stats = self.driver.stats
+        state = "STALE (holding)" if stats.stale else "tracking"
+        logger.info(
+            "Frame %d | sim %.1f Hz | %s | last frame applied %d joints",
+            self.frame_count, fps, state, stats.joints_last_applied,
+        )
+        for name in self.driver.stuck_motors():
+            logger.warning(
+                "Motor '%s' may be stuck (avg err %.3f rad)",
+                name, self.driver.health.average_error(name),
             )
-            self.last_update_time = time.time()
+        self._last_log_time = time.time()
 
     def run(self) -> None:
-        """Main control loop."""
-        logger.info("Starting main control loop...")
+        logger.info("Starting control loop...")
         try:
             while self.robot.step(self.timestep) != -1:
-                # Receive pose command
-                command = self._receive_pose_command()
+                now = self.robot.getTime()
+                command = self._drain_latest_command()
                 if command is not None:
                     angles = command.get("joint_angles_rad", {})
-                    frame_idx = command.get("frame_index", self.frame_count)
-                    
                     if angles:
-                        self._update_motor_positions(angles)
-                        if self.frame_count % 30 == 0:
-                            logger.debug(f"Applied pose frame {frame_idx} with {len(angles)} joints")
-                
-                # Update feedback
-                self._update_position_feedback()
-                
-                # Periodic logging
+                        self.driver.update(angles, now_s=now)
+                else:
+                    self.driver.check_stale(now)
+
+                self.driver.read_feedback()
+                if self.trajectory_log is not None:
+                    self.trajectory_log.record(
+                        now, self.frame_count, self.driver.commanded, self.driver.measured
+                    )
                 self._log_status()
-                
                 self.frame_count += 1
-                
         except KeyboardInterrupt:
-            logger.info("Interrupt received, shutting down gracefully")
-        except Exception as e:
-            logger.exception(f"Unexpected error in control loop: {e}")
+            logger.info("Interrupt received, shutting down")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Unexpected error in control loop: %s", exc)
         finally:
             self._cleanup()
 
     def _cleanup(self) -> None:
-        """Clean shutdown."""
-        logger.info("Cleaning up resources...")
+        logger.info("Cleaning up...")
         try:
-            # Stop all motors
-            for motor in self.motors.values():
-                if motor is not None:
-                    motor.setVelocity(0.0)
-            
-            # Close socket
-            if hasattr(self, 'sock'):
+            self.driver.stop()
+        finally:
+            if self.trajectory_log is not None:
+                self.trajectory_log.close()
+            if hasattr(self, "sock"):
                 self.sock.close()
-                
-            logger.info(f"Controller stopped after {self.frame_count} frames")
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
+            logger.info("Controller stopped after %d frames", self.frame_count)
 
 
 def main() -> None:
-    """Entry point."""
     try:
-        controller = PoseImitationController()
-        controller.run()
-    except Exception as e:
-        logger.exception(f"Fatal error: {e}")
+        PoseImitationController().run()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Fatal error: %s", exc)
         sys.exit(1)
 
 

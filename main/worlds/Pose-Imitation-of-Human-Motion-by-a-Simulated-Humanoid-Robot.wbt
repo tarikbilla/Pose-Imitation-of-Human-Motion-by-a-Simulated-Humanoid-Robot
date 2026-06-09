@@ -12,6 +12,7 @@ Viewpoint {
   position 4.472881117506071 -1.0522202310572988 0.2730153252869645
 }
 Nao {
+  controller "pose_imitation_controller"
   hidden position_0_0 1.728601858367148e-11
   hidden position2_0_0 -4.577288444974902e-09
   hidden position_0_1 -1.4146538782933988

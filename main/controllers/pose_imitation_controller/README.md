@@ -1,44 +1,84 @@
-# Webots Pose Imitation Controller
+# Webots NAO Pose Imitation Controller
 
-Real-time control system for the simulated humanoid robot based on human pose tracking.
+Real-time control system for the simulated **NAO (H25)** humanoid robot based on
+human pose tracking.
 
 ## Overview
 
-This system enables the Webots humanoid robot to imitate human movements in real-time by:
-1. Capturing human pose with MediaPipe (21-27/33 landmarks per frame)
-2. Mapping human pose to robot joint angles
-3. Sending joint commands via UDP to the Webots controller
-4. The controller applies joint angles and controls motor movements
+This system enables the Webots NAO robot to imitate human movements in real-time by:
+1. Capturing human pose with MediaPipe (up to 33 landmarks per frame) — Python side
+2. Mapping human pose to generic joint angles — Python side (`src/retargeting/`)
+3. Sending joint commands via UDP (port 8765) to the Webots controller
+4. The controller **re-maps those angles to NAO's joint conventions**, smooths,
+   clamps to mechanical limits, and drives the motors while holding balance
+
+### Architecture
+
+All the NAO-specific logic lives in one shared class, `NaoPoseDriver`, in
+[`main/libraries/pose_control_utils.py`](../../libraries/pose_control_utils.py).
+The two controller files are thin Webots/UDP wrappers around it:
+
+```
+UDP frame ─► controller (socket loop)
+                 │  joint_angles_rad (generic convention)
+                 ▼
+            NaoPoseDriver
+                 │  1. map_pipeline_angles()  — sign/offset correction
+                 │  2. clamp to NAO limits    (FR-5)
+                 │  3. exponential smoothing  (FR-6)
+                 │  4. setPosition + capped velocity
+                 ▼
+            NAO motors  (+ standing posture held for balance — NFR-4)
+```
+
+### Why a mapping layer is required
+
+The Python pipeline emits angles in a neutral convention that does **not** match
+NAO's joints. The driver corrects this:
+
+| Issue | Pipeline sends | NAO expects | Correction |
+|---|---|---|---|
+| Left elbow | `LElbowRoll` **positive** when bent | **negative** (-1.54 … -0.03) | negate |
+| Right elbow | `RElbowRoll` **negative** when bent | **positive** (0.03 … 1.54) | negate |
+| Shoulder pitch | arm-down ≈ -1.57 | arm-down ≈ +1.57 | negate |
+| Torso | `TorsoPitch` | *no such motor on NAO* | dropped |
+
+Without this layer `Motor.setPosition()` silently clamps the elbows straight and
+they never bend — which is the bug the previous controller hit.
 
 ## Controllers
 
-### 1. `pose_imitation_controller.py` (Standard)
-**Recommended for most use cases.**
+### 1. `pose_imitation_controller.py` (Standard) — **recommended**
 
-Features:
-- Real-time joint angle application
-- Smooth velocity-based motion
-- Position feedback tracking
-- Comprehensive logging
-- UDP command reception on port 8765
-
-**Usage:**
-```bash
-# Set as the main controller in Webots world file
-# The controller will start listening for commands on UDP 8765
-```
+- Re-maps pipeline angles to NAO conventions and clamps to limits
+- Exponential smoothing + per-joint velocity caps for smooth motion
+- Holds a stable standing posture (legs straight & stiff) so NAO does not fall
+- Drains the UDP backlog each step and applies only the freshest frame (low latency)
+- Holds the last pose if commands stop arriving (stale detection)
+- Position-sensor feedback + stuck-motor warnings
+- This is the controller wired into the world file's `Nao { controller ... }`
 
 ### 2. `pose_imitation_controller_advanced.py` (Advanced)
-**For advanced motion control and diagnostics.**
 
-Additional features:
-- Joint limit enforcement
-- Motor health monitoring
-- Stuck motor detection
-- Adaptive velocity control
-- Enhanced diagnostics
+Same `NaoPoseDriver` core, tuned for experimentation:
+- Smoother (laggier) motion settings
+- Optional **leg driving** (`DRIVE_LEGS = True`) for lower-body experiments —
+  off by default because NAO has no balance controller yet and will fall
+- Verbose per-joint diagnostics (commanded vs. measured, average error, stuck flags)
 
-**Requires:** `pose_control_utils.py` library
+**Both controllers require** the shared `pose_control_utils.py` library (auto-added
+to `sys.path`).
+
+### Output: joint-trajectory log (FR-7 / US-3)
+
+With `ENABLE_TRAJECTORY_LOG = True` (default), each run writes a CSV to
+`<project>/logs/webots_joint_trajectory_<epoch>.csv` containing, per simulation
+frame: `wall_time_s, sim_time_s, frame_index`, and for every driven joint a
+`<joint>_cmd_rad` (commanded) and `<joint>_meas_rad` (achieved, from the position
+sensor) column. This is the data the evaluation step uses to compute per-joint
+MAE (target vs. achieved) and timing. Logging is fully defensive — any I/O error
+disables it without disturbing the real-time loop. The `logs/` directory is
+git-ignored.
 
 ## Communication Protocol
 
@@ -65,17 +105,26 @@ The controllers receive JSON-formatted UDP packets on **port 8765**:
 - **frame_index**: Frame number from pipeline
 - **joint_angles_rad**: Dictionary of joint names to angles (radians)
 
-## Supported Joints
+## Supported Joints (NAO H25 hardware ranges)
 
-| Joint Name | Range | Purpose |
-|---|---|---|
-| LShoulderPitch | -119° to +119° | Left shoulder pitch |
-| RShoulderPitch | -119° to +119° | Right shoulder pitch |
-| LElbowRoll | 0° to +135° | Left elbow roll |
-| RElbowRoll | -135° to 0° | Right elbow roll |
-| LHipPitch | -88° to +27° | Left hip pitch |
-| RHipPitch | -88° to +27° | Right hip pitch |
-| TorsoPitch | -30° to +30° | Torso pitch (new) |
+These are the **actual NAO motor ranges** the driver clamps to. Note the elbow
+sign convention — it is the opposite of what the pipeline sends, which is why the
+driver negates those channels.
+
+| Pipeline key | NAO motor | NAO range | Driven by default |
+|---|---|---|---|
+| LShoulderPitch | LShoulderPitch | -119.5° to +119.5° | ✅ (negated) |
+| RShoulderPitch | RShoulderPitch | -119.5° to +119.5° | ✅ (negated) |
+| LElbowRoll | LElbowRoll | **-88.5° to -2°** | ✅ (negated) |
+| RElbowRoll | RElbowRoll | **+2° to +88.5°** | ✅ (negated) |
+| LHipPitch | LHipPitch | -88° to +27.7° | ⛔ legs gated (balance) |
+| RHipPitch | RHipPitch | -88° to +27.7° | ⛔ legs gated (balance) |
+| TorsoPitch | — | *no NAO motor* | ❌ dropped |
+
+Joints not driven by imitation (shoulder roll, elbow yaw, wrists, head, and the
+full leg chain) are held at a neutral standing posture so the robot keeps a
+natural pose and stays balanced. Leg driving can be enabled in the advanced
+controller via `DRIVE_LEGS = True`.
 
 ## Configuration
 
