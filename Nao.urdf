@@ -1,0 +1,695 @@
+<?xml version="1.0"?>
+<robot name="/home/CSPM26/Downloads/Nao.urdf" xmlns:xacro="http://ros.org/wiki/xacro">
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 -0.02" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.037"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.02" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.037"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0 0.055" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.055" length="0.03"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.055" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.055" length="0.03"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0.015 0.055" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.055"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0.015 0.055" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.055"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 -0.015 0.055" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.055"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.015 0.055" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.055"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="LHipYawPitch" type="revolute">
+    <parent link="base_link"/>
+    <child link="LHip"/>
+    <axis xyz="0 0.707107 -0.707107"/>
+    <limit effort="14.8" lower="-1.14529" upper="0.740718" velocity="4.16174"/>
+    <origin xyz="0 0.05 -0.085" rpy="0 0 0"/>
+  </joint>
+  <link name="LHip">
+  </link>
+  <joint name="LHipRoll" type="revolute">
+    <parent link="LHip"/>
+    <child link="solid"/>
+    <axis xyz="1 0 0"/>
+    <limit effort="14.8" lower="-0.379435" upper="0.79046" velocity="4.16174"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="solid">
+    <visual>
+      <origin xyz="-0.017 0 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.074"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.017 0 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.074"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.018 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.08 0.025 0.025"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.018 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.08 0.025 0.025"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="LHipPitch" type="revolute">
+    <parent link="solid"/>
+    <child link="solid_0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="9.8" lower="-1.77378" upper="0.48398" velocity="6.40239"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="solid_0">
+    <visual>
+      <origin xyz="-0.009 0 -0.015" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.01"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.009 0 -0.015" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.01"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.01333 0 -0.0125" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <sphere radius="0.03"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.01333 0 -0.0125" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <sphere radius="0.03"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.00467 0 -0.0175" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <sphere radius="0.03"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.00467 0 -0.0175" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <sphere radius="0.03"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.008 0 -0.066261" rpy="0 -0.383185 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.1"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.008 0 -0.066261" rpy="0 -0.383185 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.1"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="LKneePitch" type="revolute">
+    <parent link="solid_0"/>
+    <child link="solid_1"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="9.8" lower="-0.0923279" upper="2.11255" velocity="6.40239"/>
+    <origin xyz="0 0 -0.1" rpy="0 0 0"/>
+  </joint>
+  <link name="solid_1">
+    <visual>
+      <origin xyz="0.01 0 -0.033" rpy="0 0.462 0"/>
+      <geometry>
+        <box size="0.04 0.08 0.07"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.01 0 -0.033" rpy="0 0.462 0"/>
+      <geometry>
+        <box size="0.04 0.08 0.07"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0.003 -0.09" rpy="1.57 0 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.018"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0.003 -0.09" rpy="1.57 0 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.018"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0.003007 -0.081" rpy="1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.035"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0.003007 -0.081" rpy="1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.035"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 0.002993 -0.099" rpy="1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.035"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0.002993 -0.099" rpy="1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.035"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="LAnklePitch" type="revolute">
+    <parent link="solid_1"/>
+    <child link="solid_2"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="9.8" lower="-1.18944" upper="0.922581" velocity="6.40239"/>
+    <origin xyz="0 0 -0.1029" rpy="0 0.000001 0"/>
+  </joint>
+  <link name="solid_2">
+  </link>
+  <joint name="LAnkleRoll" type="revolute">
+    <parent link="solid_2"/>
+    <child link="solid_3"/>
+    <axis xyz="1 0 0"/>
+    <limit effort="14.8" lower="-0.39788" upper="0.769001" velocity="4.16174"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="solid_3">
+    <visual>
+      <origin xyz="0.015 0.007 -0.033" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.11 0.085 0.004"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.015 0.007 -0.033" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.11 0.085 0.004"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.048 0 -0.0245" rpy="-1.57 0 0"/>
+      <geometry>
+        <cylinder radius="0.008" length="0.03"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.048 0 -0.0245" rpy="-1.57 0 0"/>
+      <geometry>
+        <cylinder radius="0.008" length="0.03"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.048 0.000012 -0.0395" rpy="-1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.048 0.000012 -0.0395" rpy="-1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.048 -0.000012 -0.0095" rpy="-1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.048 -0.000012 -0.0095" rpy="-1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.065 0.005 -0.027" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.04 0.085 0.016"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.065 0.005 -0.027" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.04 0.085 0.016"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="LFoot/Bumper/Right">
+    <visual>
+      <origin xyz="0.0075 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.005 0.025 0.01"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.0075 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.005 0.025 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="solid_3_LFoot/Bumper/Right_joint" type="fixed">
+    <parent link="solid_3"/>
+    <child link="LFoot/Bumper/Right"/>
+    <origin xyz="0.09 -0.012 -0.023" rpy="0 0 0"/>
+  </joint>
+  <link name="LFoot/Bumper/Left">
+    <visual>
+      <origin xyz="0.0075 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.005 0.025 0.01"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.0075 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.005 0.025 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="solid_3_LFoot/Bumper/Left_joint" type="fixed">
+    <parent link="solid_3"/>
+    <child link="LFoot/Bumper/Left"/>
+    <origin xyz="0.09 0.022 -0.023" rpy="0 0 0"/>
+  </joint>
+  <link name="LFoot/Led">
+  </link>
+  <joint name="solid_3_LFoot/Led_joint" type="fixed">
+    <parent link="solid_3"/>
+    <child link="LFoot/Led"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="LFsr">
+  </link>
+  <joint name="solid_3_LFsr_joint" type="fixed">
+    <parent link="solid_3"/>
+    <child link="LFsr"/>
+    <origin xyz="0.020001 0.007 -0.040921" rpy="0 -0.000002 -3.141585"/>
+  </joint>
+  <joint name="RHipYawPitch" type="revolute">
+    <parent link="base_link"/>
+    <child link="RHip"/>
+    <axis xyz="0 0.707107 0.707107"/>
+    <limit effort="14.8" lower="-1.14529" upper="0.740718" velocity="4.16174"/>
+    <origin xyz="0 -0.05 -0.085" rpy="0 0 0"/>
+  </joint>
+  <link name="RHip">
+  </link>
+  <joint name="RHipRoll" type="revolute">
+    <parent link="RHip"/>
+    <child link="solid_4"/>
+    <axis xyz="1 0 0"/>
+    <limit effort="14.8" lower="-0.738274" upper="0.449597" velocity="4.16174"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="solid_4">
+    <visual>
+      <origin xyz="-0.017 0 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.074"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.017 0 0.004" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.025 0.025 0.074"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.018 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.08 0.025 0.025"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.018 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.08 0.025 0.025"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="RHipPitch" type="revolute">
+    <parent link="solid_4"/>
+    <child link="solid_5"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="9.8" lower="-1.77378" upper="0.48398" velocity="6.40239"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="solid_5">
+    <visual>
+      <origin xyz="-0.009 0 -0.015" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.01"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.009 0 -0.015" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.01"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.01333 0 -0.0125" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <sphere radius="0.03"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.01333 0 -0.0125" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <sphere radius="0.03"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.00467 0 -0.0175" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <sphere radius="0.03"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.00467 0 -0.0175" rpy="1.570803 -1.047198 -0.000004"/>
+      <geometry>
+        <sphere radius="0.03"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.008 0 -0.066261" rpy="0 -0.383185 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.1"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.008 0 -0.066261" rpy="0 -0.383185 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.1"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="RKneePitch" type="revolute">
+    <parent link="solid_5"/>
+    <child link="solid_6"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="9.8" lower="-0.0923279" upper="2.11255" velocity="6.40239"/>
+    <origin xyz="0 0 -0.1" rpy="0 0.000001 0"/>
+  </joint>
+  <link name="solid_6">
+    <visual>
+      <origin xyz="0.01 0 -0.033" rpy="0 0.462 0"/>
+      <geometry>
+        <box size="0.04 0.08 0.07"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.01 0 -0.033" rpy="0 0.462 0"/>
+      <geometry>
+        <box size="0.04 0.08 0.07"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 -0.003 -0.09" rpy="1.57 0 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.018"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.003 -0.09" rpy="1.57 0 0"/>
+      <geometry>
+        <cylinder radius="0.035" length="0.018"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 -0.002993 -0.081" rpy="1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.035"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.002993 -0.081" rpy="1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.035"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0 -0.003007 -0.099" rpy="1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.035"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.003007 -0.099" rpy="1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.035"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="RAnklePitch" type="revolute">
+    <parent link="solid_6"/>
+    <child link="solid_7"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="9.8" lower="-1.1863" upper="0.932006" velocity="6.40239"/>
+    <origin xyz="0 0 -0.1029" rpy="0 0 0"/>
+  </joint>
+  <link name="solid_7">
+  </link>
+  <joint name="RAnkleRoll" type="revolute">
+    <parent link="solid_7"/>
+    <child link="solid_8"/>
+    <axis xyz="1 0 0"/>
+    <limit effort="14.8" lower="-0.768992" upper="0.397935" velocity="4.16174"/>
+    <origin xyz="0 0 0" rpy="-0.000001 0 0"/>
+  </joint>
+  <link name="solid_8">
+    <visual>
+      <origin xyz="0.015 -0.007 -0.033" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.11 0.085 0.004"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.015 -0.007 -0.033" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.11 0.085 0.004"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.048 0 -0.0245" rpy="-1.57 0 0"/>
+      <geometry>
+        <cylinder radius="0.008" length="0.03"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.048 0 -0.0245" rpy="-1.57 0 0"/>
+      <geometry>
+        <cylinder radius="0.008" length="0.03"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.048 0.000012 -0.0395" rpy="-1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.048 0.000012 -0.0395" rpy="-1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.048 -0.000012 -0.0095" rpy="-1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.048 -0.000012 -0.0095" rpy="-1.57 0 0"/>
+      <geometry>
+        <sphere radius="0.008"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin xyz="0.065 -0.005 -0.027" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.04 0.085 0.016"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.065 -0.005 -0.027" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.04 0.085 0.016"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="RFoot/Bumper/Left">
+    <visual>
+      <origin xyz="0.0075 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.005 0.025 0.01"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.0075 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.005 0.025 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="solid_8_RFoot/Bumper/Left_joint" type="fixed">
+    <parent link="solid_8"/>
+    <child link="RFoot/Bumper/Left"/>
+    <origin xyz="0.09 0.012 -0.023" rpy="0 0 0"/>
+  </joint>
+  <link name="RFoot/Bumper/Right">
+    <visual>
+      <origin xyz="0.0075 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.005 0.025 0.01"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.0075 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.005 0.025 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="solid_8_RFoot/Bumper/Right_joint" type="fixed">
+    <parent link="solid_8"/>
+    <child link="RFoot/Bumper/Right"/>
+    <origin xyz="0.09 -0.022 -0.023" rpy="0 0 0"/>
+  </joint>
+  <link name="RFoot/Led">
+  </link>
+  <joint name="solid_8_RFoot/Led_joint" type="fixed">
+    <parent link="solid_8"/>
+    <child link="RFoot/Led"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="RFsr">
+  </link>
+  <joint name="solid_8_RFsr_joint" type="fixed">
+    <parent link="solid_8"/>
+    <child link="RFsr"/>
+    <origin xyz="0.020001 -0.007 -0.040917" rpy="0 -0.000002 -3.141585"/>
+  </joint>
+  <link name="Sonar/Left">
+  </link>
+  <joint name="base_link_Sonar/Left_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Sonar/Left"/>
+    <origin xyz="0.0477 0.0416 0.0509" rpy="0.112752 0.23678 0.449726"/>
+  </joint>
+  <link name="Sonar/Right">
+  </link>
+  <joint name="base_link_Sonar/Right_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="Sonar/Right"/>
+    <origin xyz="0.0477 -0.0416 0.0509" rpy="-0.112752 0.23678 -0.449726"/>
+  </joint>
+  <link name="inertial unit">
+  </link>
+  <joint name="base_link_inertial unit_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="inertial unit"/>
+    <origin xyz="-0.008 0.006 0.029" rpy="1.5708 0 0"/>
+  </joint>
+  <link name="gyro">
+  </link>
+  <joint name="base_link_gyro_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="gyro"/>
+    <origin xyz="-0.008 0.006 0.029" rpy="0 0 0"/>
+  </joint>
+  <link name="accelerometer">
+  </link>
+  <joint name="base_link_accelerometer_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="accelerometer"/>
+    <origin xyz="-0.008 0.00606 0.027" rpy="3.14159 0 0"/>
+  </joint>
+  <link name="super_emitter">
+  </link>
+  <joint name="base_link_super_emitter_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="super_emitter"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="emitter">
+  </link>
+  <joint name="base_link_emitter_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="emitter"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="receiver">
+  </link>
+  <joint name="base_link_receiver_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="receiver"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="gps">
+  </link>
+  <joint name="base_link_gps_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="gps"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="ChestBoard/Led">
+  </link>
+  <joint name="base_link_ChestBoard/Led_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="ChestBoard/Led"/>
+    <origin xyz="0.053 0 0.058" rpy="0 0 0"/>
+  </joint>
+</robot>

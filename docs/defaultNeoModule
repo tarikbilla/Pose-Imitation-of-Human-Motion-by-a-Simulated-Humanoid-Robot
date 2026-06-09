@@ -29,7 +29,7 @@
 #include <webots/gps.h>
 #include <webots/gyro.h>
 #include <webots/inertial_unit.h>
-#include <webots/keyboard.h>a
+#include <webots/keyboard.h>
 #include <webots/led.h>
 #include <webots/motor.h>
 #include <webots/robot.h>
@@ -51,7 +51,7 @@ static WbDeviceTag accelerometer, gps, gyro, inertial_unit;
 static WbDeviceTag fsr[2];                        // force sensitive resistors
 static WbDeviceTag lfoot_lbumper, lfoot_rbumper;  // left foot bumpers
 static WbDeviceTag rfoot_lbumper, rfoot_rbumper;  // right foot bumpers
-static WbDeviceTag leds[7];                       // controllable led groupsstatic WbDeviceTag lphalanx[PHALANX_MAX];
+static WbDeviceTag leds[7];                       // controllable led groups
 static WbDeviceTag rphalanx[PHALANX_MAX];         // right hand motors
 static WbDeviceTag lphalanx[PHALANX_MAX];         // left hand motors
 static WbDeviceTag RShoulderPitch;
@@ -310,7 +310,7 @@ static void set_hands_angle(double angle) {
     double clampedAngle = angle;
     if (clampedAngle > maxPhalanxMotorPosition[j])
       clampedAngle = maxPhalanxMotorPosition[j];
-    else if (maxPhalanxMotorPosition[j] < minPhalanxMotorPosition[j])
+    else if (clampedAngle < minPhalanxMotorPosition[j])
       clampedAngle = minPhalanxMotorPosition[j];
 
     if (rphalanx[j])

@@ -5,7 +5,7 @@ sceneTreePerspectives: 000000ff00000001000000030000001c000000c0000000fa010000000
 maximizedDockId: -1
 centralWidgetVisible: 1
 orthographicViewHeight: 1
-textFiles: 0 "controllers/pose_imitation_controller/pose_imitation_controller.py"
+textFiles: 1 "controllers/pose_imitation_controller/pose_imitation_controller.py" "../../../../../snap/webots/27/usr/share/webots/projects/robots/softbank/nao/controllers/nao_demo/nao_demo.c"
 consoles: Console:All:All
 renderingDevicePerspectives: NAO:CameraBottom;0;1;0;0
 renderingDevicePerspectives: NAO:CameraTop;1;1;0.0477151;0.0224586
