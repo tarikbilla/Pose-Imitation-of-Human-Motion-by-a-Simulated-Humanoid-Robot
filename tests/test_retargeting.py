@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 
 from src.retargeting.mapper import RetargetingMapper, default_joint_limits
-from src.types import Keypoint, PoseFrame
+from src.type_defs import Keypoint, PoseFrame
 
 
 def test_mapper_outputs_expected_joints() -> None:

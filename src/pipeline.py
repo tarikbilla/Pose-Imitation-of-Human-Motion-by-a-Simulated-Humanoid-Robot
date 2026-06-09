@@ -15,7 +15,7 @@ from src.perception.pose_estimator import PoseEstimator
 from src.perception.video_input import VideoSource
 from src.perception.visualizer import SkeletonOverlay
 from src.retargeting.mapper import RetargetingMapper, default_joint_limits
-from src.types import JointCommand
+from src.type_defs import JointCommand
 from src.utils.config import Config
 from src.utils.filtering import ExponentialSmoother
 from src.utils.fps import AdaptiveFPSController

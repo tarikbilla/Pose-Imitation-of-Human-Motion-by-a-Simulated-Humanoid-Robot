@@ -6,6 +6,13 @@ import logging
 import sys
 from pathlib import Path
 
+# If the entrypoint is executed directly as a script, the parent workspace root
+# is not automatically on sys.path. Add it so package imports like `src.pipeline`
+# resolve correctly.
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from src.pipeline import PipelineOptions, PoseImitationPipeline
 from src.utils.config import load_config
 

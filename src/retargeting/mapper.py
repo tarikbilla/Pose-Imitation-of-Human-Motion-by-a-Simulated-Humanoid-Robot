@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
-from src.types import JointCommand, Keypoint, PoseFrame
+from src.type_defs import JointCommand, Keypoint, PoseFrame
 
 
 def _vector(a: Keypoint, b: Keypoint) -> Tuple[float, float, float]:

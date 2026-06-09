@@ -4,7 +4,7 @@ import json
 import socket
 from dataclasses import dataclass
 
-from src.types import JointCommand
+from src.type_defs import JointCommand
 
 
 @dataclass

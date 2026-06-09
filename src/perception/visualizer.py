@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from src.perception.landmarks import MEDIAPIPE_POSE_LANDMARKS
-from src.types import Keypoint, PoseFrame
+from src.type_defs import Keypoint, PoseFrame
 
 logger = logging.getLogger(__name__)
 

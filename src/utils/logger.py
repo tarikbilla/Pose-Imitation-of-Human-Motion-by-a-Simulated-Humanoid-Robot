@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List
 
-from src.types import JointCommand, PoseFrame
+from src.type_defs import JointCommand, PoseFrame
 
 # All 33 MediaPipe pose landmarks (fixed schema)
 MEDIAPIPE_POSE_LANDMARKS = [
