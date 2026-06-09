@@ -44,6 +44,8 @@ SOCKET_RCVBUF = 1 << 16
 # Drive only the upper body for balance safety (see PRD NFR-4). Set True only
 # once a balance controller is in place.
 DRIVE_LEGS = False
+DRIVE_HEAD = True         # head yaw/pitch follow the human head
+SWAP_SIDES = False        # True = mirror-image mapping (robot's left <-> your right)
 SMOOTHING_ALPHA = 0.4     # EMA factor for joint targets (0..1, higher = snappier)
 VELOCITY_SCALE = 0.5      # fraction of each joint's hardware max velocity
 STALE_AFTER_S = 0.5       # hold pose if no command for this long
@@ -72,6 +74,8 @@ class PoseImitationController:
         self.driver = NaoPoseDriver(
             self.robot,
             drive_legs=DRIVE_LEGS,
+            drive_head=DRIVE_HEAD,
+            swap_sides=SWAP_SIDES,
             smoothing_alpha=SMOOTHING_ALPHA,
             velocity_scale=VELOCITY_SCALE,
             stale_after_s=STALE_AFTER_S,
@@ -141,9 +145,15 @@ class PoseImitationController:
                 now = self.robot.getTime()
                 command = self._drain_latest_command()
                 if command is not None:
-                    angles = command.get("joint_angles_rad", {})
-                    if angles:
-                        self.driver.update(angles, now_s=now)
+                    # Prefer full-body retargeting from raw landmarks; fall back
+                    # to pre-computed joint angles if only those were sent.
+                    keypoints = command.get("keypoints")
+                    if keypoints:
+                        self.driver.update_from_keypoints(keypoints, now_s=now)
+                    else:
+                        angles = command.get("joint_angles_rad", {})
+                        if angles:
+                            self.driver.update(angles, now_s=now)
                 else:
                     self.driver.check_stale(now)
 

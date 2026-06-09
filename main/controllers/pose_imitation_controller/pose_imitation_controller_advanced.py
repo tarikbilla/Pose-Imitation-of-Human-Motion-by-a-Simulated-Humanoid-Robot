@@ -37,7 +37,9 @@ UDP_HOST = "127.0.0.1"
 UDP_PORT = 8765
 SOCKET_RCVBUF = 1 << 16
 
-DRIVE_LEGS = False        # set True to experiment with hip-pitch imitation
+DRIVE_LEGS = False        # set True to experiment with full leg imitation
+DRIVE_HEAD = True
+SWAP_SIDES = False        # True = mirror-image mapping
 SMOOTHING_ALPHA = 0.3     # smoother (laggier) than the standard controller
 VELOCITY_SCALE = 0.4
 STALE_AFTER_S = 0.5
@@ -65,6 +67,8 @@ class AdvancedPoseController:
         self.driver = NaoPoseDriver(
             self.robot,
             drive_legs=DRIVE_LEGS,
+            drive_head=DRIVE_HEAD,
+            swap_sides=SWAP_SIDES,
             smoothing_alpha=SMOOTHING_ALPHA,
             velocity_scale=VELOCITY_SCALE,
             stale_after_s=STALE_AFTER_S,
@@ -137,9 +141,13 @@ class AdvancedPoseController:
                 now = self.robot.getTime()
                 command = self._drain_latest_command()
                 if command is not None:
-                    angles = command.get("joint_angles_rad", {})
-                    if angles:
-                        self.driver.update(angles, now_s=now)
+                    keypoints = command.get("keypoints")
+                    if keypoints:
+                        self.driver.update_from_keypoints(keypoints, now_s=now)
+                    else:
+                        angles = command.get("joint_angles_rad", {})
+                        if angles:
+                            self.driver.update(angles, now_s=now)
                 else:
                     self.driver.check_stale(now)
 

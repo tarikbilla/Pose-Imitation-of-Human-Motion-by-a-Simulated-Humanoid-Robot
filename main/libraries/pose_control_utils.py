@@ -301,6 +301,8 @@ class NaoPoseDriver:
         robot,
         *,
         drive_legs: bool = False,
+        drive_head: bool = True,
+        swap_sides: bool = False,
         smoothing_alpha: float = 0.4,
         velocity_scale: float = 0.5,
         stale_after_s: float = 0.5,
@@ -309,6 +311,8 @@ class NaoPoseDriver:
         self.robot = robot
         self.timestep = int(robot.getBasicTimeStep())
         self.drive_legs = drive_legs
+        self.drive_head = drive_head
+        self.swap_sides = swap_sides
         self.velocity_scale = max(0.05, min(1.0, velocity_scale))
         self.stale_after_s = stale_after_s
         self.log = logger or _null_logger
@@ -378,11 +382,8 @@ class NaoPoseDriver:
         self.log("Applied standing posture")
 
     # -- per-frame update ---------------------------------------------------
-    def update(self, incoming: Dict[str, float], now_s: Optional[float] = None) -> int:
-        """Apply one pose frame. Returns the number of joints commanded."""
-        targets = map_pipeline_angles(
-            incoming, drive_legs=self.drive_legs, limiter=self.limiter
-        )
+    def _apply_targets(self, targets: Dict[str, float], now_s: Optional[float]) -> int:
+        """Smooth, command and bookkeep a set of NAO joint targets."""
         applied = 0
         for name, target in targets.items():
             if name not in self.motors:
@@ -397,6 +398,35 @@ class NaoPoseDriver:
         self.stats.joints_last_applied = applied
         self.stats.stale = False
         return applied
+
+    def update(self, incoming: Dict[str, float], now_s: Optional[float] = None) -> int:
+        """Apply one frame of *pre-computed* pipeline joint angles (fallback).
+
+        Returns the number of joints commanded.
+        """
+        targets = map_pipeline_angles(
+            incoming, drive_legs=self.drive_legs, limiter=self.limiter
+        )
+        return self._apply_targets(targets, now_s)
+
+    def update_from_keypoints(
+        self, keypoints: Dict[str, object], now_s: Optional[float] = None
+    ) -> int:
+        """Apply one frame by retargeting raw MediaPipe landmarks (full body).
+
+        Returns the number of joints commanded. Imported lazily to avoid a
+        circular import (``nao_retarget`` depends on this module).
+        """
+        from nao_retarget import retarget_full_body
+
+        targets = retarget_full_body(
+            keypoints,
+            drive_legs=self.drive_legs,
+            drive_head=self.drive_head,
+            swap_sides=self.swap_sides,
+            limiter=self.limiter,
+        )
+        return self._apply_targets(targets, now_s)
 
     def read_feedback(self) -> None:
         """Read position sensors and record tracking error for health checks."""
@@ -435,9 +465,16 @@ class NaoPoseDriver:
     @property
     def logged_joints(self) -> List[str]:
         """Joints worth logging for fidelity metrics (driven joints only)."""
-        joints = list(DRIVEN_ARM_JOINTS)
+        joints = [
+            "LShoulderPitch", "RShoulderPitch",
+            "LShoulderRoll", "RShoulderRoll",
+            "LElbowRoll", "RElbowRoll",
+        ]
+        if self.drive_head:
+            joints += ["HeadYaw", "HeadPitch"]
         if self.drive_legs:
-            joints += list(DRIVEN_LEG_JOINTS)
+            for side in ("L", "R"):
+                joints += [f"{side}HipPitch", f"{side}KneePitch", f"{side}AnklePitch"]
         return [j for j in joints if j in self.motors]
 
 

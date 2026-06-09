@@ -14,22 +14,48 @@ This system enables the Webots NAO robot to imitate human movements in real-time
 
 ### Architecture
 
-All the NAO-specific logic lives in one shared class, `NaoPoseDriver`, in
-[`main/libraries/pose_control_utils.py`](../../libraries/pose_control_utils.py).
-The two controller files are thin Webots/UDP wrappers around it:
+The Python pipeline streams, per frame, **both** raw MediaPipe landmarks and a
+small set of pre-computed joint angles. The controller prefers the landmarks and
+does **full-body retargeting** itself; the joint angles are a fallback.
+
+- [`main/libraries/nao_retarget.py`](../../libraries/nao_retarget.py) — landmarks → NAO joints (shoulder pitch+roll, elbow, head, optional legs)
+- [`main/libraries/pose_control_utils.py`](../../libraries/pose_control_utils.py) — `NaoPoseDriver` (limits, smoothing, standing balance) + logging
+- the two controller files are thin Webots/UDP wrappers
 
 ```
 UDP frame ─► controller (socket loop)
-                 │  joint_angles_rad (generic convention)
+                 │  keypoints (preferred)         joint_angles_rad (fallback)
+                 ▼                                       │
+            retarget_full_body()  ◄──────────────────────┘ map_pipeline_angles()
+                 │  NAO joint targets
                  ▼
             NaoPoseDriver
-                 │  1. map_pipeline_angles()  — sign/offset correction
-                 │  2. clamp to NAO limits    (FR-5)
-                 │  3. exponential smoothing  (FR-6)
-                 │  4. setPosition + capped velocity
+                 │  1. clamp to NAO limits     (FR-5)
+                 │  2. exponential smoothing   (FR-6)
+                 │  3. setPosition + capped velocity
                  ▼
             NAO motors  (+ standing posture held for balance — NFR-4)
 ```
+
+### What follows the human (full body)
+
+| Human motion | NAO joints | Notes |
+|---|---|---|
+| Arm up / down | `ShoulderPitch` | vertical component of the upper-arm |
+| Arm left / right (abduction) | `ShoulderRoll` | lateral component — **now working** |
+| Elbow bend | `ElbowRoll` | angle between upper-arm and forearm |
+| Head turn / nod | `HeadYaw`, `HeadPitch` | from nose vs. shoulder midline (`DRIVE_HEAD`) |
+| Legs (hip/knee/ankle) | `HipPitch`, `KneePitch`, `AnklePitch` | `DRIVE_LEGS` — **off by default**, no balance controller yet |
+
+The shoulder is the key part: NAO's 2-DOF shoulder is recovered from the single
+observed arm direction by splitting it into a vertical part (`ShoulderPitch`) and
+a lateral part (`ShoulderRoll`) — depth-free, so it is robust for a frontal
+camera. Every joint is gated on landmark **visibility**, so anything out of frame
+(usually the legs) is simply not commanded and the driver holds its last pose.
+
+**Tunables** (top of each controller): `DRIVE_HEAD`, `DRIVE_LEGS`,
+`SWAP_SIDES` (mirror-image mapping), `SMOOTHING_ALPHA`, `VELOCITY_SCALE`.
+If left/right feels mirrored the wrong way, set `SWAP_SIDES = True`.
 
 ### Why a mapping layer is required
 
@@ -88,14 +114,13 @@ The controllers receive JSON-formatted UDP packets on **port 8765**:
 {
   "timestamp_s": 1234567890.123,
   "frame_index": 45,
-  "joint_angles_rad": {
-    "LShoulderPitch": 0.5,
-    "RShoulderPitch": -0.3,
-    "LElbowRoll": 1.2,
-    "RElbowRoll": -1.1,
-    "LHipPitch": -0.1,
-    "RHipPitch": 0.2,
-    "TorsoPitch": 0.05
+  "joint_angles_rad": { "LShoulderPitch": 0.5, "RElbowRoll": -1.1 },
+  "keypoints": {
+    "left_shoulder":  [0.40, 0.40, -0.1, 0.99],
+    "left_elbow":     [0.22, 0.40, -0.1, 0.98],
+    "left_wrist":     [0.06, 0.40, -0.1, 0.97],
+    "right_shoulder": [0.60, 0.40, -0.1, 0.99],
+    "nose":           [0.50, 0.22, -0.2, 0.99]
   }
 }
 ```
@@ -103,7 +128,12 @@ The controllers receive JSON-formatted UDP packets on **port 8765**:
 ### Fields:
 - **timestamp_s**: Frame timestamp in seconds
 - **frame_index**: Frame number from pipeline
-- **joint_angles_rad**: Dictionary of joint names to angles (radians)
+- **keypoints** *(preferred)*: MediaPipe landmarks `name → [x, y, z, visibility]`
+  in normalized image coordinates (`x` right, `y` down, both 0–1). The controller
+  retargets these to the full NAO pose. A curated subset (~17 landmarks: head,
+  shoulders, elbows, wrists, hips, knees, ankles) is streamed to keep packets small.
+- **joint_angles_rad** *(fallback)*: pre-computed joint angles, used only when no
+  `keypoints` are present.
 
 ## Supported Joints (NAO H25 hardware ranges)
 

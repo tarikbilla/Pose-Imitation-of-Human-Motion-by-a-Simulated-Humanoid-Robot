@@ -133,7 +133,9 @@ class PoseImitationPipeline:
                     )
                     run_logger.log_joint_command(command)
                     if bridge is not None:
-                        bridge.send_joint_command(command)
+                        # Stream joint angles + raw landmarks so the Webots
+                        # controller can do full-body retargeting.
+                        bridge.send_pose_frame(command, pose.keypoints)
 
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
                 latency_window.append(elapsed_ms)
