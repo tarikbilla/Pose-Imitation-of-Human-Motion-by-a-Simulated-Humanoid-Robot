@@ -50,30 +50,25 @@ HEAD_PITCH_GAIN = 1.6
 HEAD_PITCH_BASELINE = 0.9  # nose sits ~0.9 shoulder-widths above shoulder line
 
 # ---------------------------------------------------------------------------
-# Lower-body (crouch + lateral lean) tuning
+# Lower-body (gentle crouch) tuning
 # ---------------------------------------------------------------------------
-# The legs are driven as a *single, symmetric, statically-balanced* posture
-# rather than two independent limbs. A monocular frontal camera cannot give the
-# depth / dynamics needed for true balance, so we never let the legs do anything
-# that moves the centre of mass outside the foot support polygon: both legs
-# always mirror each other, and the ankle always cancels the hip+knee so the
-# torso stays vertical and the feet stay flat on the floor.
+# The robot is a *free-standing* biped here (no balance controller), so the legs
+# are driven only as a single, symmetric, statically-balanced crouch — never a
+# lean or a single-leg motion, which would move the centre of mass off NAO's
+# small feet and topple it. Both legs always mirror each other and the ankle
+# cancels the hip+knee so the torso stays vertical and the feet stay flat:
 #
 #   crouch:  knee bend -> HipPitch = -u, KneePitch = +2u, AnklePitch = -u
-#            (HipPitch + KneePitch + AnklePitch == 0  =>  torso stays vertical,
-#             foot stays flat; hip stays roughly over the ankle => CoM centred)
-#   sway:    sideways torso lean -> HipRoll = +rho, AnkleRoll = -rho on both
-#            legs (HipRoll + AnkleRoll == 0  => feet stay flat laterally).
+#            (HipPitch + KneePitch + AnklePitch == 0  =>  torso vertical, foot
+#             flat; thigh~=shank length => hip stays over the ankle => CoM stays
+#             inside the foot polygon, so NAO holds the squat statically).
 #
-# Everything is clamped conservatively; even if a sign is mis-tuned for a given
-# world setup the robot sways/squats gently the "wrong" way instead of falling,
-# and a single constant flips it.
+# Kept deliberately SHALLOW and slow (see leg_velocity_factor in the driver):
+# deep/fast squats are where a free-standing NAO becomes marginal. Raise
+# MAX_CROUCH cautiously and watch for tipping.
 KNEE_STRAIGHT_DEADZONE = 0.20  # rad of knee bend treated as "standing straight"
 KNEE_BEND_RANGE = 1.30         # rad of human knee bend mapped to full crouch
-MAX_CROUCH = 0.60              # rad; u in [0, MAX_CROUCH] (deep-ish but balanced)
-LEAN_ROLL_GAIN = 0.8           # human lateral torso tilt -> NAO roll (flip sign to mirror)
-MAX_LEAN_ROLL = 0.10           # rad; small lateral sway (pelvis is pinned upright, so
-                               # keep this gentle to avoid foot jitter against the lock)
+MAX_CROUCH = 0.35              # rad; u in [0, MAX_CROUCH] (shallow = stays balanced)
 
 Vec = Tuple[float, float, float]
 Landmark = Tuple[float, float, float, float]  # x, y, z, visibility
@@ -194,12 +189,12 @@ def _knee_bend(kps: Dict[str, Landmark], side: str) -> Optional[float]:
 
 
 def _lower_body(kps: Dict[str, Landmark]) -> Dict[str, float]:
-    """Statically-balanced crouch + lateral sway for both legs.
+    """Statically-balanced, symmetric crouch for both legs (no lean).
 
     Returns a *symmetric* leg posture so the robot's centre of mass stays over
     its feet (see the module-level tuning notes). Both legs always get the same
-    pitch posture; the only left/right asymmetry is the (clamped) lateral lean,
-    which the ankle rolls cancel to keep the feet flat.
+    pitch posture and the ankles cancel the hip+knee, so the torso stays
+    vertical and the feet stay flat — a squat NAO can hold without falling.
     """
     bend_l = _knee_bend(kps, "L")
     bend_r = _knee_bend(kps, "R")
@@ -207,7 +202,7 @@ def _lower_body(kps: Dict[str, Landmark]) -> Dict[str, float]:
     if not bends:
         return {}
 
-    # --- crouch (symmetric squat, torso vertical, feet flat) ---------------
+    # Symmetric squat from the averaged knee bend (torso vertical, feet flat).
     avg_bend = sum(bends) / len(bends)
     crouch = _clamp((avg_bend - KNEE_STRAIGHT_DEADZONE) / KNEE_BEND_RANGE, 0.0, 1.0)
     u = crouch * MAX_CROUCH
@@ -215,25 +210,10 @@ def _lower_body(kps: Dict[str, Landmark]) -> Dict[str, float]:
     knee_pitch = 2.0 * u      # bend knee
     ankle_pitch = -u          # cancel hip+knee so torso stays vertical & foot flat
 
-    # --- lateral sway (whole-body lean, feet stay flat) --------------------
-    rho = 0.0
-    if _visible(kps, "left_shoulder", "right_shoulder", "left_hip", "right_hip"):
-        sh_mid_x = (kps["left_shoulder"][0] + kps["right_shoulder"][0]) / 2.0
-        hip_mid_x = (kps["left_hip"][0] + kps["right_hip"][0]) / 2.0
-        sh_mid_y = (kps["left_shoulder"][1] + kps["right_shoulder"][1]) / 2.0
-        hip_mid_y = (kps["left_hip"][1] + kps["right_hip"][1]) / 2.0
-        torso_h = abs(hip_mid_y - sh_mid_y) + 1e-6
-        lean = (sh_mid_x - hip_mid_x) / torso_h   # +: shoulders lean toward image-right
-        rho = _clamp(lean * LEAN_ROLL_GAIN, -MAX_LEAN_ROLL, MAX_LEAN_ROLL)
-
     return {
-        # pitch posture: identical on both legs (symmetry == balance)
         "LHipPitch": hip_pitch, "RHipPitch": hip_pitch,
         "LKneePitch": knee_pitch, "RKneePitch": knee_pitch,
         "LAnklePitch": ankle_pitch, "RAnklePitch": ankle_pitch,
-        # lateral sway: same world roll on both hips, cancelled at the ankles
-        "LHipRoll": rho, "RHipRoll": rho,
-        "LAnkleRoll": -rho, "RAnkleRoll": -rho,
     }
 
 
@@ -296,8 +276,5 @@ def retargetable_joints(drive_legs: bool = False, drive_head: bool = True) -> Li
         joints += ["HeadYaw", "HeadPitch"]
     if drive_legs:
         for side in ("L", "R"):
-            joints += [
-                f"{side}HipPitch", f"{side}KneePitch", f"{side}AnklePitch",
-                f"{side}HipRoll", f"{side}AnkleRoll",
-            ]
+            joints += [f"{side}HipPitch", f"{side}KneePitch", f"{side}AnklePitch"]
     return joints

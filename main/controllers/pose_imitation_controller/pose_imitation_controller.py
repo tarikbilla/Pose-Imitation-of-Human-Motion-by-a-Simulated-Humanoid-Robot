@@ -27,7 +27,7 @@ import time
 from typing import Dict, Optional
 
 try:
-    from controller import Supervisor  # type: ignore
+    from controller import Robot  # type: ignore
 except ImportError:
     print("Error: Webots controller module not found. Run this only in Webots.")
     sys.exit(1)
@@ -41,10 +41,10 @@ UDP_HOST = "127.0.0.1"
 UDP_PORT = 8765
 SOCKET_RCVBUF = 1 << 16
 
-# Full-body imitation. Legs follow the user as a statically-balanced crouch +
-# lateral sway (symmetric, ankle-compensated) so the robot tracks your body
-# without a dynamic balance controller and without falling (see PRD NFR-4 and
-# nao_retarget._lower_body). Set False to fall back to upper-body-only.
+# Legs follow the user as a shallow, symmetric, statically-balanced crouch only
+# (no lean/step — those topple a free-standing NAO). The robot stands under
+# gravity and squats when you squat; arms + head track as usual. Set False for
+# upper-body-only. See nao_retarget._lower_body and PRD NFR-4.
 DRIVE_LEGS = True
 DRIVE_HEAD = True         # head yaw/pitch follow the human head
 SWAP_SIDES = False        # True = mirror-image mapping (robot's left <-> your right)
@@ -52,16 +52,6 @@ SMOOTHING_ALPHA = 0.4     # EMA factor for joint targets (0..1, higher = snappie
 VELOCITY_SCALE = 0.5      # fraction of each joint's hardware max velocity
 LEG_VELOCITY_FACTOR = 0.5 # extra slow-down on leg joints (eases crouch/sway in)
 STALE_AFTER_S = 0.5       # hold pose if no command for this long
-
-# Base stabilization (the "don't fall over" fix). NAO is a free-standing biped;
-# moving the legs/body shifts the centre of mass off its tiny feet and gravity
-# topples it. With no dynamic balance controller available, we instead remove
-# the toppling degrees of freedom: the Supervisor pins the pelvis upright and in
-# place horizontally while leaving its *height* free, so the robot can still
-# crouch (body lowers under gravity, feet stay on the floor) and animate every
-# joint, but it cannot tip over. Requires `supervisor TRUE` on the Nao node.
-# Set False to run as a plain free-standing robot (will fall when legs move).
-KEEP_UPRIGHT = True
 
 # Log commanded vs. achieved joint angles to <project>/logs/ for offline
 # imitation-fidelity metrics (PRD FR-7 / US-3).
@@ -76,67 +66,13 @@ logging.basicConfig(
 logger = logging.getLogger("PoseController")
 
 
-class BaseStabilizer:
-    """Keeps the robot from toppling by constraining its floating base.
-
-    NAO has no dynamic balance controller here, so instead of *recovering* from
-    a fall we *prevent* one by removing the unstable degrees of freedom of the
-    pelvis (the controller's own node): each step we re-pin its horizontal
-    position and upright orientation and zero the horizontal/angular velocity.
-    The vertical axis is left free, so the body still drops when the legs crouch
-    and rests on the feet — the robot can imitate the user's body and legs but
-    physically cannot tip over.
-
-    Needs ``supervisor TRUE`` on the Nao node. If the controller is not a
-    supervisor (``getSelf()`` is None) the stabilizer disables itself and the
-    robot runs as a plain — fall-prone — free-standing biped.
-    """
-
-    def __init__(self, robot, logger) -> None:
-        self.log = logger
-        self.enabled = False
-        node = robot.getSelf() if hasattr(robot, "getSelf") else None
-        if node is None:
-            self.log("Base stabilizer OFF (controller is not a Supervisor; "
-                     "set 'supervisor TRUE' on the Nao node to prevent falling)")
-            return
-        try:
-            self.node = node
-            self.translation = node.getField("translation")
-            self.rotation = node.getField("rotation")
-            self._xy = self.translation.getSFVec3f()[:2]   # lock-in spot on the floor
-            self._upright = list(self.rotation.getSFRotation())  # initial upright pose
-            self.enabled = True
-            self.log("Base stabilizer ON (pelvis pinned upright; height free for crouch)")
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"Base stabilizer OFF ({exc})")
-            self.enabled = False
-
-    def step(self) -> None:
-        if not self.enabled:
-            return
-        try:
-            pos = self.translation.getSFVec3f()
-            # Lock horizontal position + upright orientation; keep current height.
-            self.translation.setSFVec3f([self._xy[0], self._xy[1], pos[2]])
-            self.rotation.setSFRotation(self._upright)
-            # Bleed off any toppling/sliding momentum, preserve vertical motion.
-            vx, vy, vz, wx, wy, wz = self.node.getVelocity()
-            self.node.setVelocity([0.0, 0.0, vz, 0.0, 0.0, 0.0])
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"Base stabilizer disabled mid-run ({exc})")
-            self.enabled = False
-
-
 class PoseImitationController:
     """Webots glue around :class:`NaoPoseDriver`."""
 
     def __init__(self) -> None:
-        self.robot = Supervisor()
+        self.robot = Robot()
         self.timestep = int(self.robot.getBasicTimeStep())
         logger.info("Initializing NAO pose controller (timestep: %dms)", self.timestep)
-
-        self.stabilizer = BaseStabilizer(self.robot, logger.info) if KEEP_UPRIGHT else None
 
         self.driver = NaoPoseDriver(
             self.robot,
@@ -210,8 +146,6 @@ class PoseImitationController:
         logger.info("Starting control loop...")
         try:
             while self.robot.step(self.timestep) != -1:
-                if self.stabilizer is not None:
-                    self.stabilizer.step()
                 now = self.robot.getTime()
                 command = self._drain_latest_command()
                 if command is not None:

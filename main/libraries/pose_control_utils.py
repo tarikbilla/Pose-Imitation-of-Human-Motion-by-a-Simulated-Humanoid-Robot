@@ -245,14 +245,13 @@ def map_pipeline_angles(
 # Joints that imitation actively drives. Everything else is held at its
 # rest_angle for a stable, natural-looking standing pose.
 DRIVEN_ARM_JOINTS = ("LShoulderPitch", "RShoulderPitch", "LElbowRoll", "RElbowRoll")
-# Full balance-aware lower body: symmetric crouch (hip/knee/ankle pitch) plus a
-# clamped lateral sway (hip/ankle roll). See nao_retarget._lower_body.
+# Lower body: a single symmetric, statically-balanced crouch (hip/knee/ankle
+# pitch only — no roll/lean, which would topple a free-standing NAO). See
+# nao_retarget._lower_body.
 DRIVEN_LEG_JOINTS = (
     "LHipPitch", "RHipPitch",
     "LKneePitch", "RKneePitch",
     "LAnklePitch", "RAnklePitch",
-    "LHipRoll", "RHipRoll",
-    "LAnkleRoll", "RAnkleRoll",
 )
 
 
@@ -493,10 +492,7 @@ class NaoPoseDriver:
             joints += ["HeadYaw", "HeadPitch"]
         if self.drive_legs:
             for side in ("L", "R"):
-                joints += [
-                    f"{side}HipPitch", f"{side}KneePitch", f"{side}AnklePitch",
-                    f"{side}HipRoll", f"{side}AnkleRoll",
-                ]
+                joints += [f"{side}HipPitch", f"{side}KneePitch", f"{side}AnklePitch"]
         return [j for j in joints if j in self.motors]
 
 

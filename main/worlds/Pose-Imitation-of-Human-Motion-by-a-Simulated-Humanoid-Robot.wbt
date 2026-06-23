@@ -13,7 +13,6 @@ Viewpoint {
 }
 Nao {
   controller "pose_imitation_controller"
-  supervisor TRUE
   translation 0 0 0.333
   rotation 0 0 1 0
 }
