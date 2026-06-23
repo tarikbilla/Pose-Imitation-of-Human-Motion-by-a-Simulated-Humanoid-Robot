@@ -245,7 +245,15 @@ def map_pipeline_angles(
 # Joints that imitation actively drives. Everything else is held at its
 # rest_angle for a stable, natural-looking standing pose.
 DRIVEN_ARM_JOINTS = ("LShoulderPitch", "RShoulderPitch", "LElbowRoll", "RElbowRoll")
-DRIVEN_LEG_JOINTS = ("LHipPitch", "RHipPitch")
+# Full balance-aware lower body: symmetric crouch (hip/knee/ankle pitch) plus a
+# clamped lateral sway (hip/ankle roll). See nao_retarget._lower_body.
+DRIVEN_LEG_JOINTS = (
+    "LHipPitch", "RHipPitch",
+    "LKneePitch", "RKneePitch",
+    "LAnklePitch", "RAnklePitch",
+    "LHipRoll", "RHipRoll",
+    "LAnkleRoll", "RAnkleRoll",
+)
 
 
 def standing_posture() -> Dict[str, float]:
@@ -291,6 +299,10 @@ class NaoPoseDriver:
         EMA factor for joint targets in (0, 1].
     velocity_scale:
         Fraction of each joint's hardware max velocity used as the motion cap.
+    leg_velocity_factor:
+        Extra multiplier (0..1) applied on top of ``velocity_scale`` for the
+        leg joints only, so the weight-bearing crouch/sway eases in slowly and
+        does not jolt the robot off balance (NFR-4).
     stale_after_s:
         If no command arrives within this many seconds, the driver is marked
         stale (the robot simply holds its last commanded pose).
@@ -305,6 +317,7 @@ class NaoPoseDriver:
         swap_sides: bool = False,
         smoothing_alpha: float = 0.4,
         velocity_scale: float = 0.5,
+        leg_velocity_factor: float = 0.5,
         stale_after_s: float = 0.5,
         logger: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -314,6 +327,7 @@ class NaoPoseDriver:
         self.drive_head = drive_head
         self.swap_sides = swap_sides
         self.velocity_scale = max(0.05, min(1.0, velocity_scale))
+        self.leg_velocity_factor = max(0.05, min(1.0, leg_velocity_factor))
         self.stale_after_s = stale_after_s
         self.log = logger or _null_logger
 
@@ -370,7 +384,12 @@ class NaoPoseDriver:
     def _velocity_for(self, name: str) -> float:
         cfg = self.configs.get(name)
         ceiling = cfg.max_velocity if cfg else 4.0
-        return ceiling * self.velocity_scale
+        scale = self.velocity_scale
+        # Legs carry the robot's weight: move them gently so a crouch/sway eases
+        # in rather than jolting the centre of mass off the feet (NFR-4).
+        if name in DRIVEN_LEG_JOINTS:
+            scale *= self.leg_velocity_factor
+        return ceiling * scale
 
     # -- posture ------------------------------------------------------------
     def apply_standing_posture(self) -> None:
@@ -474,7 +493,10 @@ class NaoPoseDriver:
             joints += ["HeadYaw", "HeadPitch"]
         if self.drive_legs:
             for side in ("L", "R"):
-                joints += [f"{side}HipPitch", f"{side}KneePitch", f"{side}AnklePitch"]
+                joints += [
+                    f"{side}HipPitch", f"{side}KneePitch", f"{side}AnklePitch",
+                    f"{side}HipRoll", f"{side}AnkleRoll",
+                ]
         return [j for j in joints if j in self.motors]
 
 

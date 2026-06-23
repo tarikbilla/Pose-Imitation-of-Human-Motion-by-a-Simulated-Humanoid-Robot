@@ -41,13 +41,16 @@ UDP_HOST = "127.0.0.1"
 UDP_PORT = 8765
 SOCKET_RCVBUF = 1 << 16
 
-# Drive only the upper body for balance safety (see PRD NFR-4). Set True only
-# once a balance controller is in place.
-DRIVE_LEGS = False
+# Full-body imitation. Legs follow the user as a statically-balanced crouch +
+# lateral sway (symmetric, ankle-compensated) so the robot tracks your body
+# without a dynamic balance controller and without falling (see PRD NFR-4 and
+# nao_retarget._lower_body). Set False to fall back to upper-body-only.
+DRIVE_LEGS = True
 DRIVE_HEAD = True         # head yaw/pitch follow the human head
 SWAP_SIDES = False        # True = mirror-image mapping (robot's left <-> your right)
 SMOOTHING_ALPHA = 0.4     # EMA factor for joint targets (0..1, higher = snappier)
 VELOCITY_SCALE = 0.5      # fraction of each joint's hardware max velocity
+LEG_VELOCITY_FACTOR = 0.5 # extra slow-down on leg joints (eases crouch/sway in)
 STALE_AFTER_S = 0.5       # hold pose if no command for this long
 
 # Log commanded vs. achieved joint angles to <project>/logs/ for offline
@@ -78,6 +81,7 @@ class PoseImitationController:
             swap_sides=SWAP_SIDES,
             smoothing_alpha=SMOOTHING_ALPHA,
             velocity_scale=VELOCITY_SCALE,
+            leg_velocity_factor=LEG_VELOCITY_FACTOR,
             stale_after_s=STALE_AFTER_S,
             logger=logger.info,
         )
