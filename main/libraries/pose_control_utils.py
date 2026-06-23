@@ -318,6 +318,7 @@ class NaoPoseDriver:
         velocity_scale: float = 0.5,
         leg_velocity_factor: float = 0.5,
         stale_after_s: float = 0.5,
+        enable_balance: bool = False,
         logger: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.robot = robot
@@ -339,8 +340,23 @@ class NaoPoseDriver:
         self.sensors: Dict[str, object] = {}
         self.commanded: Dict[str, float] = {}
         self.measured: Dict[str, float] = {}
+        # The pose imitation wants this leg posture; the balance loop adds small
+        # corrections on top of it each control step.
+        self.base_targets: Dict[str, float] = {}
         self.stats = DriverStats()
         self._last_command_time: Optional[float] = None
+
+        # Model-based CoM balance feedback (Option 2: FK + known link masses).
+        # Imported lazily and guarded so the driver still runs if numpy/balance
+        # is unavailable.
+        self.balance = None
+        if enable_balance:
+            try:
+                from balance import BalanceController, NaoCoMModel
+                self.balance = BalanceController(NaoCoMModel())
+                self.log("Balance feedback ON (model-based CoM, Fibonacci search)")
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Balance feedback OFF ({exc})")
 
         self._setup_devices()
         self.apply_standing_posture()
@@ -406,6 +422,7 @@ class NaoPoseDriver:
         for name, target in targets.items():
             if name not in self.motors:
                 continue
+            self.base_targets[name] = target
             smoothed = self.smoother.smooth(name, target)
             self._set_motor(name, smoothed, self._velocity_for(name))
             applied += 1
@@ -415,6 +432,36 @@ class NaoPoseDriver:
         self.stats.frames_applied += 1
         self.stats.joints_last_applied = applied
         self.stats.stale = False
+        return applied
+
+    def balance_tick(self, torso_rp: tuple = (0.0, 0.0)) -> int:
+        """Run one CoM balance cycle: re-command the legs as base + correction.
+
+        Called every control step (not just on new pose frames) so balance is
+        maintained continuously. ``torso_rp`` is the InertialUnit (roll, pitch)
+        in rad. Returns the number of joints nudged. No-op if balance is off.
+        """
+        if self.balance is None:
+            return 0
+        # Best estimate of the current pose: measured where available, else the
+        # last commanded angle.
+        state = dict(self.commanded)
+        state.update(self.measured)
+        try:
+            corr = self.balance.compute_correction(state, torso_rp)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"Balance step failed, disabling ({exc})")
+            self.balance = None
+            return 0
+
+        applied = 0
+        for name, delta in corr.items():
+            if name not in self.motors:
+                continue
+            base = self.base_targets.get(name, self.configs[name].rest_angle)
+            smoothed = self.smoother.smooth(name, base + delta)
+            self._set_motor(name, smoothed, self._velocity_for(name))
+            applied += 1
         return applied
 
     def update(self, incoming: Dict[str, float], now_s: Optional[float] = None) -> int:

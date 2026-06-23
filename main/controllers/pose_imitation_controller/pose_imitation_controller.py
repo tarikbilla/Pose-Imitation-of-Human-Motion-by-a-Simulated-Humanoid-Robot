@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import socket
 import sys
@@ -53,6 +54,14 @@ VELOCITY_SCALE = 0.5      # fraction of each joint's hardware max velocity
 LEG_VELOCITY_FACTOR = 0.5 # extra slow-down on leg joints (eases crouch/sway in)
 STALE_AFTER_S = 0.5       # hold pose if no command for this long
 
+# Model-based CoM balance feedback (recovers the depth/balance info the 2D camera
+# loses). Forward kinematics + NAO link masses estimate the centre of mass each
+# step; the InertialUnit gives the gravity direction; a Fibonacci-spiral search
+# nudges the ankles/hips to keep the CoM over the feet. Runs in normal
+# controller mode (no Supervisor). See main/libraries/balance.py.
+ENABLE_BALANCE = True
+INERTIAL_UNIT_NAME = "inertial unit"  # NAO IMU device (gravity/tilt sensing)
+
 # Log commanded vs. achieved joint angles to <project>/logs/ for offline
 # imitation-fidelity metrics (PRD FR-7 / US-3).
 ENABLE_TRAJECTORY_LOG = True
@@ -83,8 +92,10 @@ class PoseImitationController:
             velocity_scale=VELOCITY_SCALE,
             leg_velocity_factor=LEG_VELOCITY_FACTOR,
             stale_after_s=STALE_AFTER_S,
+            enable_balance=ENABLE_BALANCE,
             logger=logger.info,
         )
+        self._init_imu()
         self._init_socket()
 
         self.trajectory_log = None
@@ -96,6 +107,35 @@ class PoseImitationController:
         self.frame_count = 0
         self._last_log_time = time.time()
         logger.info("Controller initialized; waiting for pose commands...")
+
+    def _init_imu(self) -> None:
+        """Enable the InertialUnit so balance can sense the torso's true tilt."""
+        self.imu = None
+        if not ENABLE_BALANCE:
+            return
+        imu = self.robot.getDevice(INERTIAL_UNIT_NAME)
+        if imu is None:
+            logger.warning("InertialUnit '%s' not found; balance runs CoM-only",
+                           INERTIAL_UNIT_NAME)
+            return
+        try:
+            imu.enable(self.timestep)
+            self.imu = imu
+            logger.info("InertialUnit enabled for balance feedback")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not enable InertialUnit: %s", exc)
+
+    def _torso_tilt(self) -> tuple:
+        """(roll, pitch) of the torso in rad from the IMU; (0, 0) if unavailable."""
+        if self.imu is None:
+            return (0.0, 0.0)
+        try:
+            roll, pitch, _yaw = self.imu.getRollPitchYaw()
+            if math.isnan(roll) or math.isnan(pitch):
+                return (0.0, 0.0)
+            return (roll, pitch)
+        except Exception:  # noqa: BLE001
+            return (0.0, 0.0)
 
     def _init_socket(self) -> None:
         logger.info("Opening UDP socket on %s:%d ...", UDP_HOST, UDP_PORT)
@@ -162,6 +202,9 @@ class PoseImitationController:
                     self.driver.check_stale(now)
 
                 self.driver.read_feedback()
+                # Continuous balance: keep the CoM over the feet every step,
+                # regardless of how often pose frames arrive.
+                self.driver.balance_tick(self._torso_tilt())
                 if self.trajectory_log is not None:
                     self.trajectory_log.record(
                         now, self.frame_count, self.driver.commanded, self.driver.measured
