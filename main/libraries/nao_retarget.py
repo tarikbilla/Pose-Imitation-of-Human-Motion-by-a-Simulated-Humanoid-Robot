@@ -72,7 +72,8 @@ KNEE_STRAIGHT_DEADZONE = 0.20  # rad of knee bend treated as "standing straight"
 KNEE_BEND_RANGE = 1.30         # rad of human knee bend mapped to full crouch
 MAX_CROUCH = 0.60              # rad; u in [0, MAX_CROUCH] (deep-ish but balanced)
 LEAN_ROLL_GAIN = 0.8           # human lateral torso tilt -> NAO roll (flip sign to mirror)
-MAX_LEAN_ROLL = 0.20           # rad; hard cap on lateral sway (keeps CoM over feet)
+MAX_LEAN_ROLL = 0.10           # rad; small lateral sway (pelvis is pinned upright, so
+                               # keep this gentle to avoid foot jitter against the lock)
 
 Vec = Tuple[float, float, float]
 Landmark = Tuple[float, float, float, float]  # x, y, z, visibility
