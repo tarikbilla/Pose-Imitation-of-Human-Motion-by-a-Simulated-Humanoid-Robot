@@ -319,6 +319,11 @@ class NaoPoseDriver:
         leg_velocity_factor: float = 0.5,
         stale_after_s: float = 0.5,
         enable_balance: bool = False,
+        enable_walk: bool = False,
+        walk_tier: str = "march",
+        gait_smoothing_alpha: float = 0.7,
+        gait_leg_velocity_factor: float = 0.85,
+        gait_params: Optional[object] = None,
         logger: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.robot = robot
@@ -328,12 +333,18 @@ class NaoPoseDriver:
         self.swap_sides = swap_sides
         self.velocity_scale = max(0.05, min(1.0, velocity_scale))
         self.leg_velocity_factor = max(0.05, min(1.0, leg_velocity_factor))
+        self.gait_leg_velocity_factor = max(0.05, min(1.0, gait_leg_velocity_factor))
         self.stale_after_s = stale_after_s
+        self.enable_walk = enable_walk
+        self.walk_tier = walk_tier
         self.log = logger or _null_logger
 
         self.configs = get_default_motor_configs()
         self.limiter = JointLimiter(self.configs)
         self.smoother = ExponentialSmoother(smoothing_alpha)
+        # Legs under the gait engine need their own, snappier smoother so the
+        # walking waveform is not double-attenuated by the arm/head EMA (FR-6).
+        self.gait_smoother = ExponentialSmoother(gait_smoothing_alpha)
         self.health = MotorHealthMonitor()
 
         self.motors: Dict[str, object] = {}
@@ -357,6 +368,24 @@ class NaoPoseDriver:
                 self.log("Balance feedback ON (model-based CoM, Fibonacci search)")
             except Exception as exc:  # noqa: BLE001
                 self.log(f"Balance feedback OFF ({exc})")
+
+        # Walk engine (gait command -> balance-stable leg motion). When enabled,
+        # the gait path is the SOLE commander of the legs and the retargeter's
+        # crouch is skipped (gait owns the lower body). Imported lazily because
+        # ``gait`` imports this module.
+        self.gait_engine = None
+        self._gait_meta: Dict[str, object] = {"single_support": False, "amp_gain": 0.0}
+        if enable_walk:
+            try:
+                from gait import GaitEngine
+                com_model = self.balance.model if self.balance is not None else None
+                self.gait_engine = GaitEngine(
+                    params=gait_params, com_model=com_model, limiter=self.limiter
+                )
+                self.log(f"Walk engine ON (tier={walk_tier})")
+            except Exception as exc:  # noqa: BLE001
+                self.enable_walk = False
+                self.log(f"Walk engine OFF ({exc})")
 
         self._setup_devices()
         self.apply_standing_posture()
@@ -464,6 +493,75 @@ class NaoPoseDriver:
             applied += 1
         return applied
 
+    # -- gait / walking -----------------------------------------------------
+    def set_gait_command(self, gait: Optional[Dict[str, object]]) -> None:
+        """Hand the latest gait command (from the Python cue extractor) to the
+        walk engine. No-op when walking is disabled."""
+        if self.gait_engine is not None:
+            self.gait_engine.set_command(gait)
+
+    def _gait_velocity_for(self, name: str) -> float:
+        """Leg velocity while walking: a higher factor than the gentle crouch so
+        the gait waveform actually moves (it would otherwise collapse to a
+        shuffle under the crouch's slow leg velocity)."""
+        cfg = self.configs.get(name)
+        ceiling = cfg.max_velocity if cfg else 4.0
+        return ceiling * self.velocity_scale * self.gait_leg_velocity_factor
+
+    def gait_tick(self, now_s: float, torso_rp: tuple = (0.0, 0.0),
+                  fsr: Optional[Dict[str, float]] = None) -> int:
+        """Advance the walk engine one step and command the legs.
+
+        When walking is enabled this REPLACES ``balance_tick`` for the lower
+        body and is the sole commander of the 12 leg joints: it asks the engine
+        for the gait leg posture, folds in the symmetric CoM balance correction
+        while in double support (Tier A, where that correction is valid), and
+        commands the legs with the snappier gait smoother and raised leg
+        velocity. In single support (Tier B) the gait owns the roll axis and the
+        symmetric correction is skipped (the engine's IMU-tilt abort is the
+        safety net). Returns the number of joints commanded; 0 if walk is off.
+        """
+        if self.gait_engine is None:
+            return 0
+        state = dict(self.commanded)
+        state.update(self.measured)
+        try:
+            targets, meta = self.gait_engine.step(
+                now_s, tier=self.walk_tier, torso_rp=torso_rp, fsr=fsr, measured=state
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"Gait step failed, disabling walk ({exc})")
+            self.gait_engine = None
+            return 0
+        self._gait_meta = meta
+
+        if self.balance is not None and not meta.get("single_support", False):
+            try:
+                corr = self.balance.compute_correction(state, torso_rp)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Balance step failed, disabling ({exc})")
+                self.balance = None
+                corr = {}
+            for name, delta in corr.items():
+                targets[name] = self.limiter.clamp_angle(
+                    name, targets.get(name, 0.0) + delta
+                )
+
+        applied = 0
+        for name, value in targets.items():
+            if name not in self.motors:
+                continue
+            self.base_targets[name] = value
+            smoothed = self.gait_smoother.smooth(name, value)
+            self._set_motor(name, smoothed, self._gait_velocity_for(name))
+            applied += 1
+        return applied
+
+    @property
+    def gait_meta(self) -> Dict[str, object]:
+        """Latest walk-engine telemetry (amp_gain, phase, cadence, single_support)."""
+        return dict(self._gait_meta)
+
     def update(self, incoming: Dict[str, float], now_s: Optional[float] = None) -> int:
         """Apply one frame of *pre-computed* pipeline joint angles (fallback).
 
@@ -484,9 +582,12 @@ class NaoPoseDriver:
         """
         from nao_retarget import retarget_full_body
 
+        # When the walk engine is active it OWNS the legs (the gait posture
+        # replaces the retargeter's crouch), so don't let the keypoint path
+        # fight it for the lower body.
         targets = retarget_full_body(
             keypoints,
-            drive_legs=self.drive_legs,
+            drive_legs=self.drive_legs and not self.enable_walk,
             drive_head=self.drive_head,
             swap_sides=self.swap_sides,
             limiter=self.limiter,
@@ -537,9 +638,12 @@ class NaoPoseDriver:
         ]
         if self.drive_head:
             joints += ["HeadYaw", "HeadPitch"]
-        if self.drive_legs:
+        if self.drive_legs or self.enable_walk:
             for side in ("L", "R"):
                 joints += [f"{side}HipPitch", f"{side}KneePitch", f"{side}AnklePitch"]
+        if self.enable_walk:
+            for side in ("L", "R"):
+                joints += [f"{side}HipRoll", f"{side}AnkleRoll"]
         return [j for j in joints if j in self.motors]
 
 

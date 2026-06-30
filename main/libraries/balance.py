@@ -205,6 +205,30 @@ class NaoCoMModel:
         sole_local = np.array([0.5 * (FOOT_X_BACK + FOOT_X_FRONT), 0.0, -FOOT_HEIGHT])
         return T[:3, :3] @ sole_local + T[:3, 3]
 
+    def stance_margin(self, angles: Dict[str, float], side: str,
+                      frames: Optional[Dict[str, np.ndarray]] = None) -> float:
+        """Signed distance (m) of the whole-body CoM *inside* one foot's support
+        rectangle — positive when the CoM projects within the foot, negative when
+        it has left it.
+
+        This is the single-support balance test the symmetric double-support
+        :class:`BalanceController` cannot provide: it scores the CoM against the
+        STANCE foot alone (not the two-foot midpoint). The walk engine uses it as
+        a hard gate — it refuses to lift the swing foot unless the CoM is safely
+        over the stance foot. Model-based (forward kinematics), so it is testable
+        off-simulation; an IMU-tilt refinement of the projection is future work.
+        """
+        frames = frames if frames is not None else self.frames(angles)
+        com = self.com(angles, frames)
+        T = frames[f"{side}AnkleRoll"]
+        # Express the CoM in the foot's own (AnkleRoll) frame; its x/y are the
+        # fore-aft and lateral offsets within the (near-horizontal) sole plane.
+        com_local = T[:3, :3].T @ (com - T[:3, 3])
+        x, y = float(com_local[0]), float(com_local[1])
+        fore_aft = min(x - FOOT_X_BACK, FOOT_X_FRONT - x)
+        lateral = min(y + FOOT_HALF_WIDTH, FOOT_HALF_WIDTH - y)
+        return min(fore_aft, lateral)
+
 
 # ---------------------------------------------------------------------------
 # Fibonacci / golden-angle spiral sampling

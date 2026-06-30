@@ -35,6 +35,7 @@ class WebotsBridge:
         self,
         command: JointCommand,
         keypoints: Optional[Dict[str, Keypoint]] = None,
+        gait: Optional[Dict[str, object]] = None,
     ) -> bytes:
         payload: Dict[str, object] = {
             "timestamp_s": command.timestamp_s,
@@ -47,6 +48,10 @@ class WebotsBridge:
                 for name, kp in keypoints.items()
                 if name in KEYPOINTS_TO_STREAM
             }
+        if gait is not None:
+            # Compact walk command (cadence/phase/swing/stop) for the on-robot
+            # gait engine. Additive and optional: older controllers ignore it.
+            payload["gait"] = gait
         return json.dumps(payload).encode("utf-8")
 
     def send_joint_command(self, command: JointCommand) -> None:
@@ -57,13 +62,16 @@ class WebotsBridge:
         self,
         command: JointCommand,
         keypoints: Optional[Dict[str, Keypoint]] = None,
+        gait: Optional[Dict[str, object]] = None,
     ) -> None:
-        """Send joint angles plus raw landmarks for full-body retargeting.
+        """Send joint angles plus raw landmarks (full-body retargeting) and an
+        optional gait command (real-time walking).
 
         The controller prefers ``keypoints`` (full-body) and falls back to
-        ``joint_angles_rad`` when no landmarks are present.
+        ``joint_angles_rad`` when no landmarks are present; ``gait`` drives the
+        on-robot walk engine and is ignored by builds that don't support it.
         """
-        self._sock.sendto(self._encode(command, keypoints), (self.host, self.port))
+        self._sock.sendto(self._encode(command, keypoints, gait), (self.host, self.port))
 
     def close(self) -> None:
         self._sock.close()

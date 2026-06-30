@@ -125,8 +125,15 @@ python run.py --no-display --no-webots
 python run.py
 ```
 
-> Note: the current Webots controller focuses on safe upper-body imitation.
-> Lower-body joints (`LHipPitch`, `RHipPitch`, `TorsoPitch`) are ignored to keep the robot upright until full balance and ankle control are implemented.
+> Note: the controller does safe upper-body imitation **and real-time walking**.
+> When you march / walk in place in front of the camera, the robot replicates
+> your gait via an on-robot walk engine (it tracks your cadence, phase and stop —
+> it does not copy raw leg angles, which is unreliable from a single camera).
+> The default `WALK_TIER = "march"` is a double-support march that never fully
+> unloads a foot, so the robot stays upright; an experimental single-support
+> stepping tier (`WALK_TIER = "step"`) is available but off by default. Set
+> `walk.enabled: false` in `configs/default.yaml` for upper-body-only behaviour.
+> See `main/controllers/pose_imitation_controller/README.md` → *Real-time walking*.
 
 ### 4.5 Optional flags
 - `--source 0` — use webcam index 0  

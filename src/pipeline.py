@@ -11,6 +11,7 @@ from typing import Deque, Optional
 
 import cv2
 
+from src.perception.gait_cues import GaitCueExtractor
 from src.perception.pose_estimator import PoseEstimator
 from src.perception.video_input import VideoSource
 from src.perception.visualizer import SkeletonOverlay
@@ -90,6 +91,18 @@ class PoseImitationPipeline:
         smoother = ExponentialSmoother(alpha=float(cfg.get("retargeting.smoothing_alpha", 0.35)))
         overlay = SkeletonOverlay(show=self.options.show_window)
 
+        # Real-time walking: distil the human's gait into a compact command the
+        # on-robot walk engine executes (the robot replicates the walk, not raw
+        # leg angles — monocular depth is unreliable). Computed every frame so
+        # cadence/phase stay warm; streamed only when walking is enabled.
+        walk_enabled = bool(cfg.get("walk.enabled", True))
+        gait_extractor = GaitCueExtractor(
+            window_s=float(cfg.get("walk.cue_window_s", 1.3)),
+            amp_start=float(cfg.get("walk.amp_start", 0.08)),
+            amp_stop=float(cfg.get("walk.amp_stop", 0.05)),
+            conf_min=float(cfg.get("walk.cue_conf_min", 0.6)),
+        )
+
         run_name = time.strftime("run_%Y%m%d_%H%M%S")
         log_dir = Path(cfg.get("logging.output_dir", "logs")) / run_name
         run_logger = CsvRunLogger(log_dir)
@@ -123,6 +136,8 @@ class PoseImitationPipeline:
                 pose = estimator.estimate(image, frame.timestamp_s, frame.frame_index)
                 run_logger.log_pose(pose)
 
+                gait_cmd = gait_extractor.update(pose)
+
                 command = mapper.map_pose(pose)
                 if command.joint_angles_rad:
                     smoothed = smoother.update(command.joint_angles_rad)
@@ -133,9 +148,12 @@ class PoseImitationPipeline:
                     )
                     run_logger.log_joint_command(command)
                     if bridge is not None:
-                        # Stream joint angles + raw landmarks so the Webots
-                        # controller can do full-body retargeting.
-                        bridge.send_pose_frame(command, pose.keypoints)
+                        # Stream joint angles + raw landmarks (full-body
+                        # retargeting) and the gait command (real-time walking).
+                        bridge.send_pose_frame(
+                            command, pose.keypoints,
+                            gait=gait_cmd.as_dict() if walk_enabled else None,
+                        )
 
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
                 latency_window.append(elapsed_ms)
@@ -150,6 +168,8 @@ class PoseImitationPipeline:
                         f"Target FPS: {fps_controller.current_fps:5.1f}",
                         f"Joints: {n_joints}   Visible: {visible_landmarks}/33",
                         "Source: MediaPipe" if estimator.is_real else "Source: SYNTHETIC",
+                        f"Gait: {gait_cmd.state:5s} {gait_cmd.cadence_hz:.2f}Hz "
+                        f"conf {gait_cmd.conf:.2f}",
                     ]
                     canvas = overlay.draw(
                         image, pose,

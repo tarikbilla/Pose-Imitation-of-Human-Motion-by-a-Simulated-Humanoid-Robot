@@ -36,5 +36,17 @@ webots_bridge:
   host: 127.0.0.1
   port: 8765
 
+# Real-time walking (Python side: gait-cue extraction + streaming).
+# The robot replicates the human's WALK via an on-robot gait engine; it does NOT
+# copy raw leg angles (monocular depth is unreliable). The walk TIER (march vs.
+# experimental single-support step) is selected controller-side in
+# main/controllers/pose_imitation_controller/pose_imitation_controller.py.
+walk:
+  enabled: true        # stream the gait command in the UDP packet
+  cue_window_s: 1.3    # history window for cadence/amplitude (s)
+  amp_start: 0.08      # normalized knee-swing amplitude to START marching
+  amp_stop: 0.05       # below this -> STOP (hysteresis; bias to standing still)
+  cue_conf_min: 0.6    # min visible lower-body fraction to trust a gait reading
+
 logging:
   output_dir: logs

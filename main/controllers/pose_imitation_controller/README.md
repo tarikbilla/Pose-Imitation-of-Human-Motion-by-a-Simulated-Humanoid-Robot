@@ -57,6 +57,45 @@ camera. Every joint is gated on landmark **visibility**, so anything out of fram
 `SWAP_SIDES` (mirror-image mapping), `SMOOTHING_ALPHA`, `VELOCITY_SCALE`.
 If left/right feels mirrored the wrong way, set `SWAP_SIDES = True`.
 
+## Real-time walking (gait engine)
+
+The robot also **replicates the human's walk** — but it does *not* copy raw leg
+angles (monocular depth is unreliable and a direct leg-copy topples a
+free-standing NAO). Instead the Python side distils the human's lower body into a
+small **gait command** and an on-robot engine turns that into balance-stable leg
+motion that tracks your cadence, phase, swing side and stop.
+
+```
+human legs ─► GaitCueExtractor (src/perception/gait_cues.py, Python)
+                 │  {state, cadence_hz, phase, swing_side, intensity, conf}
+                 ▼  (added to the UDP packet as "gait")
+            controller ─► NaoPoseDriver.gait_tick()
+                 ▼
+            GaitEngine (main/libraries/gait.py)  ── own sim-time phase clock,
+                 │   phase-locked to the human, amp_gain ramps 0↔1
+                 ▼
+            12 leg-joint targets  +  symmetric CoM balance (double support)
+```
+
+**Two tiers** (set `WALK_TIER` at the top of `pose_imitation_controller.py`):
+
+| `WALK_TIER` | What it does | Stability |
+|---|---|---|
+| `"march"` *(default)* | **Tier A** double-support weight-shift march: alternating knee pump + small lateral CoM sway in time with your cadence/phase. **Never fully unloads a foot**, so the existing symmetric balance loop stays valid. Reads as marching / walking-in-place. | No-fall by design |
+| `"step"` | **Tier B** single-support stepping (real foot lift). Only lifts a foot when the CoM model (and foot-force sensors, if present) confirm it is safe, else collapses to double support. | **Experimental** — unproven on a free-standing NAO; opt-in |
+| `"stand"` | Legs held in the static crouch (walk engine idle). | — |
+
+Safety invariants: the engine **always** decays smoothly back to the symmetric
+crouch on stop / low confidence / stale frames / excess torso tilt — it never
+freezes mid-step. With `ENABLE_WALK = False` the behaviour is byte-identical to
+the previous crouch + balance baseline. Master switch on the Python side:
+`walk.enabled` in `configs/default.yaml`.
+
+**Walk tunables** (top of `pose_imitation_controller.py`): `ENABLE_WALK`,
+`WALK_TIER`, `GAIT_SMOOTHING_ALPHA`, `GAIT_LEG_VELOCITY_FACTOR`. Gait waveform
+amplitudes (knee bob, sway, step height, cadence cap, tilt abort) live in
+`GaitParams` in `main/libraries/gait.py`.
+
 ### Why a mapping layer is required
 
 The Python pipeline emits angles in a neutral convention that does **not** match
@@ -121,6 +160,10 @@ The controllers receive JSON-formatted UDP packets on **port 8765**:
     "left_wrist":     [0.06, 0.40, -0.1, 0.97],
     "right_shoulder": [0.60, 0.40, -0.1, 0.99],
     "nose":           [0.50, 0.22, -0.2, 0.99]
+  },
+  "gait": {
+    "state": "march", "cadence_hz": 0.95, "phase": 1.83,
+    "swing_side": 1, "intensity": 0.7, "turn": 0.0, "conf": 0.98
   }
 }
 ```
@@ -134,6 +177,10 @@ The controllers receive JSON-formatted UDP packets on **port 8765**:
   shoulders, elbows, wrists, hips, knees, ankles) is streamed to keep packets small.
 - **joint_angles_rad** *(fallback)*: pre-computed joint angles, used only when no
   `keypoints` are present.
+- **gait** *(optional, real-time walking)*: compact gait command for the on-robot
+  walk engine — `state` (`idle`/`march`), `cadence_hz`, `phase` (rad), `swing_side`
+  (±1), `intensity` (0–1), `turn` (−1…1), `conf` (0–1). Additive and
+  backward-compatible: controllers without the walk engine ignore it.
 
 ## Supported Joints (NAO H25 hardware ranges)
 

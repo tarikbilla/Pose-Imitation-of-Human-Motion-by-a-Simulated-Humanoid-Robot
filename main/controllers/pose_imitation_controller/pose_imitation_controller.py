@@ -62,6 +62,30 @@ STALE_AFTER_S = 0.5       # hold pose if no command for this long
 ENABLE_BALANCE = True
 INERTIAL_UNIT_NAME = "inertial unit"  # NAO IMU device (gravity/tilt sensing)
 
+# Real-time walking. The human's detected gait (cadence/phase/swing/stop) drives
+# an on-robot walk engine (main/libraries/gait.py) that produces balance-stable
+# leg motion — the robot replicates the human's WALK, not their raw leg angles.
+#   WALK_TIER = "march": Tier A double-support weight-shift march (default,
+#       never fully unloads a foot -> stays in the regime the symmetric balance
+#       loop keeps upright; reads as marching/walking-in-place, no falls).
+#   WALK_TIER = "step":  Tier B single-support stepping (EXPERIMENTAL; only lifts
+#       a foot when the CoM model + foot-force sensors confirm it is safe, else
+#       it stays double-support). Unproven on a free-standing NAO — opt in only.
+#   WALK_TIER = "stand": legs held in the static crouch (walk engine idle).
+ENABLE_WALK = True
+WALK_TIER = "march"
+GAIT_SMOOTHING_ALPHA = 0.7      # snappier than the arm EMA so the gait waveform survives
+GAIT_LEG_VELOCITY_FACTOR = 0.85  # raised leg velocity while walking (vs. gentle crouch)
+GYRO_NAME = "gyro"
+ACCELEROMETER_NAME = "accelerometer"
+# Candidate NAO foot force-sensor device names (Tier B only; best-effort, the
+# names vary by proto version — any that resolve are summed per foot, the rest
+# are ignored and the engine falls back to its model-only stance gate).
+FSR_DEVICES = {
+    "L": ["LFsr", "LFootFSR", "LFoot/Fsr", "force_sensor_left"],
+    "R": ["RFsr", "RFootFSR", "RFoot/Fsr", "force_sensor_right"],
+}
+
 # Log commanded vs. achieved joint angles to <project>/logs/ for offline
 # imitation-fidelity metrics (PRD FR-7 / US-3).
 ENABLE_TRAJECTORY_LOG = True
@@ -93,9 +117,14 @@ class PoseImitationController:
             leg_velocity_factor=LEG_VELOCITY_FACTOR,
             stale_after_s=STALE_AFTER_S,
             enable_balance=ENABLE_BALANCE,
+            enable_walk=ENABLE_WALK,
+            walk_tier=WALK_TIER,
+            gait_smoothing_alpha=GAIT_SMOOTHING_ALPHA,
+            gait_leg_velocity_factor=GAIT_LEG_VELOCITY_FACTOR,
             logger=logger.info,
         )
         self._init_imu()
+        self._init_walk_sensors()
         self._init_socket()
 
         self.trajectory_log = None
@@ -137,6 +166,58 @@ class PoseImitationController:
         except Exception:  # noqa: BLE001
             return (0.0, 0.0)
 
+    def _init_walk_sensors(self) -> None:
+        """Enable the gyro/accelerometer and any foot force sensors used by the
+        walk engine. All best-effort and NaN-guarded: Tier A needs none of them,
+        and Tier B falls back to the model-only stance gate when they are absent.
+        """
+        self.gyro = None
+        self.fsr: Dict[str, list] = {"L": [], "R": []}
+        if not ENABLE_WALK:
+            return
+        for name in (GYRO_NAME, ACCELEROMETER_NAME):
+            dev = self.robot.getDevice(name)
+            if dev is not None:
+                try:
+                    dev.enable(self.timestep)
+                except Exception:  # noqa: BLE001
+                    continue
+                if name == GYRO_NAME:
+                    self.gyro = dev
+        for side, names in FSR_DEVICES.items():
+            for name in names:
+                dev = self.robot.getDevice(name)
+                if dev is None:
+                    continue
+                try:
+                    dev.enable(self.timestep)
+                except Exception:  # noqa: BLE001
+                    continue
+                self.fsr[side].append(dev)
+        n_fsr = len(self.fsr["L"]) + len(self.fsr["R"])
+        logger.info("Walk sensors: gyro=%s, foot-force sensors=%d",
+                    self.gyro is not None, n_fsr)
+
+    def _read_fsr(self):
+        """Per-foot vertical load {"L": fz, "R": fz} from the FSRs, or None.
+
+        Returns None when no force sensors resolved (Tier A doesn't need them;
+        Tier B then uses the CoM-model stance gate alone)."""
+        if not self.fsr["L"] and not self.fsr["R"]:
+            return None
+        out = {}
+        for side in ("L", "R"):
+            total = 0.0
+            for dev in self.fsr[side]:
+                try:
+                    v = dev.getValue()
+                except Exception:  # noqa: BLE001
+                    continue
+                if v is not None and not math.isnan(v):
+                    total += abs(float(v))
+            out[side] = total
+        return out
+
     def _init_socket(self) -> None:
         logger.info("Opening UDP socket on %s:%d ...", UDP_HOST, UDP_PORT)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -175,6 +256,13 @@ class PoseImitationController:
             "Frame %d | sim %.1f Hz | %s | last frame applied %d joints",
             self.frame_count, fps, state, stats.joints_last_applied,
         )
+        if self.driver.enable_walk:
+            m = self.driver.gait_meta
+            logger.info(
+                "  walk[%s] amp=%.2f cadence=%.2fHz phase=%.2f single_support=%s",
+                WALK_TIER, float(m.get("amp_gain", 0.0)), float(m.get("cadence", 0.0)),
+                float(m.get("phase", 0.0)), m.get("single_support", False),
+            )
         for name in self.driver.stuck_motors():
             logger.warning(
                 "Motor '%s' may be stuck (avg err %.3f rad)",
@@ -198,13 +286,24 @@ class PoseImitationController:
                         angles = command.get("joint_angles_rad", {})
                         if angles:
                             self.driver.update(angles, now_s=now)
+                    # Hand the latest gait command to the walk engine (if any).
+                    self.driver.set_gait_command(command.get("gait"))
                 else:
-                    self.driver.check_stale(now)
+                    # No fresh frame: if we've gone stale, tell the walk engine to
+                    # stop (it ramps amplitude to 0 -> back to the static crouch).
+                    if self.driver.check_stale(now):
+                        self.driver.set_gait_command(None)
 
                 self.driver.read_feedback()
-                # Continuous balance: keep the CoM over the feet every step,
-                # regardless of how often pose frames arrive.
-                self.driver.balance_tick(self._torso_tilt())
+                torso_rp = self._torso_tilt()
+                # Continuous lower-body control every step, regardless of how
+                # often pose frames arrive. While walking, the gait engine is the
+                # sole leg commander (and folds in balance during double support);
+                # otherwise the standalone balance loop keeps the CoM over the feet.
+                if self.driver.enable_walk:
+                    self.driver.gait_tick(now, torso_rp, fsr=self._read_fsr())
+                else:
+                    self.driver.balance_tick(torso_rp)
                 if self.trajectory_log is not None:
                     self.trajectory_log.record(
                         now, self.frame_count, self.driver.commanded, self.driver.measured
