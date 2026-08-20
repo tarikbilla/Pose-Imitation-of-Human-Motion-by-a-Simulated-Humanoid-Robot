@@ -256,6 +256,30 @@ def test_excess_tilt_stands_the_robot_down() -> None:
     assert meta["mode"] == MODE_DOUBLE
 
 
+def test_tilt_gate_also_freezes_the_antisymmetric_lean() -> None:
+    """The "standing down" gate must not keep reapplying an asymmetric
+    forward/back stride onto the legs -- that is exactly the kind of input
+    that tips the robot over. Reapplying it anyway (only ``swing``/lift was
+    gated, not the double-support deviation) is what let the robot get stuck
+    leaning: the CoM balance correction never got to recover because the
+    lean-inducing signal kept being reasserted every step."""
+    p = LowerBodyParams()
+    tilt = p.tilt_abort_rad + 0.1
+    ctl = LowerBodyController(com_model=NaoCoMModel())
+    targets, meta, _, _ = run(ctl, split_stance(0.5), 1.0, torso_rp=(tilt, 0.0))
+    assert meta["tilt_ok"] is False
+    assert meta["mode"] == MODE_DOUBLE
+    assert targets["LHipPitch"] == pytest.approx(targets["RHipPitch"], abs=1e-9)
+    assert targets["LAnklePitch"] == pytest.approx(targets["RAnklePitch"], abs=1e-9)
+
+    # ... but the same asymmetric stance is honoured once tilt recovers, so
+    # this is a gate, not a dead code path.
+    ctl2 = LowerBodyController(com_model=NaoCoMModel())
+    ok_targets, ok_meta, _, _ = run(ctl2, split_stance(0.5), 1.0, torso_rp=(0.0, 0.0))
+    assert ok_meta["tilt_ok"] is True
+    assert abs(ok_targets["LHipPitch"] - ok_targets["RHipPitch"]) > 0.05
+
+
 def test_low_confidence_stands_the_robot_down() -> None:
     ctl = LowerBodyController(com_model=NaoCoMModel())
     _, meta, _, _ = run(ctl, lifting("L", conf=0.1), 3.0)

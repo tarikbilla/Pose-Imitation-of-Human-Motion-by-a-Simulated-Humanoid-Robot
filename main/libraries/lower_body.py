@@ -314,7 +314,9 @@ class LowerBodyController:
         if st.stance:
             self._shift_direction(st.stance, measured, now_s)
 
-        targets = self._compose(obs, swing, yaw_bias if mode == MODE_DOUBLE else 0.0)
+        targets = self._compose(
+            obs, swing, yaw_bias if mode == MODE_DOUBLE else 0.0, usable
+        )
         clamped = {n: self.limiter.clamp_angle(n, v) for n, v in targets.items()}
         self._limit_sole_tilt(clamped)
         meta: Dict[str, object] = {
@@ -500,9 +502,17 @@ class LowerBodyController:
         return direction
 
     def _compose(
-        self, obs: LowerBodyObservation, swing: str, yaw_bias: float
+        self, obs: LowerBodyObservation, swing: str, yaw_bias: float, usable: bool
     ) -> Dict[str, float]:
-        """Symmetric crouch + authority-weighted per-leg human deviation + lean."""
+        """Symmetric crouch + authority-weighted per-leg human deviation + lean.
+
+        ``usable`` gates only the ANTIsymmetric part of the double-support
+        deviation (see ``_apply_symmetric``): a lean/stride asymmetry is what
+        tips the robot, so it must not keep being reapplied once tilt_ok is
+        already False, the very case the "standing down" gate exists for. The
+        symmetric part (wider stance) is CoM-neutral and stays at full
+        authority regardless, per the module docstring.
+        """
         p = self.params
         st = self.state
         u = self._crouch_u(obs)
@@ -530,7 +540,7 @@ class LowerBodyController:
                 for name, value in dev.items():
                     targets[name] = targets.get(name, 0.0) + weight * value
         else:
-            self._apply_symmetric(targets, dev_l, dev_r)
+            self._apply_symmetric(targets, dev_l, dev_r, usable)
 
         if st.shift > 1e-4 and st.stance:
             lean = p.shift_rad * st.shift * self._shift_dir_cached(st.stance)
@@ -557,15 +567,21 @@ class LowerBodyController:
         targets: Dict[str, float],
         dev_l: Optional[Dict[str, float]],
         dev_r: Optional[Dict[str, float]],
+        usable: bool,
     ) -> None:
         """Add the human's double-support deviation, split by symmetry.
 
         The mirror-symmetric half (wider stance, deeper squat) is CoM-neutral and
-        enlarges the support polygon, so it passes at full authority; the
-        antisymmetric half (a lean, a split stance) moves the CoM and stays
-        limited. See the module docstring.
+        enlarges the support polygon, so it passes at full authority regardless of
+        ``usable``; the antisymmetric half (a lean, a split stance -- exactly the
+        kind of asymmetry that tips the robot) moves the CoM and is gated to zero
+        whenever ``usable`` is False, e.g. because tilt_ok already tripped. It must
+        not keep reapplying a lean-inducing signal once the robot is already
+        "standing down" for being too tilted -- that starves the CoM balance
+        correction of ever catching up. See the module docstring.
         """
         p = self.params
+        asym_gain = p.asymmetric_gain if usable else 0.0
         for channel, mirrored in (
             *((c, True) for c in self._MIRRORED_CHANNELS),
             *((c, False) for c in self._ALIGNED_CHANNELS),
@@ -580,7 +596,7 @@ class LowerBodyController:
                     if value is not None:
                         targets[side + channel] = (
                             targets.get(side + channel, 0.0)
-                            + p.asymmetric_gain * value
+                            + asym_gain * value
                         )
                 continue
 
@@ -599,12 +615,12 @@ class LowerBodyController:
 
             targets["L" + channel] = (
                 targets.get("L" + channel, 0.0)
-                + p.symmetric_gain * l_sym + p.asymmetric_gain * antisym
+                + p.symmetric_gain * l_sym + asym_gain * antisym
             )
             targets["R" + channel] = (
                 targets.get("R" + channel, 0.0)
                 + p.symmetric_gain * r_sym
-                + p.asymmetric_gain * (antisym if mirrored else -antisym)
+                + asym_gain * (antisym if mirrored else -antisym)
             )
 
     def apply_sole_tilt_limit(self, targets: Dict[str, float]) -> Dict[str, float]:
