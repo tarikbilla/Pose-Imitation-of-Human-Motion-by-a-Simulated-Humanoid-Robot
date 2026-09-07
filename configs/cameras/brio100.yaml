@@ -1,0 +1,15 @@
+name: brio100
+source: 0
+capture_width: 1920
+capture_height: 1080
+fps: 30
+fourcc: MJPG
+rotation: 90
+autofocus: false
+diagonal_fov_deg: 58.0
+intrinsics:
+  fx: 0.0
+  fy: 0.0
+  cx: 0.0
+  cy: 0.0
+  calibrated: false

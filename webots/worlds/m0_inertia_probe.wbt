@@ -1,0 +1,133 @@
+#VRML_SIM R2025a utf8
+
+WorldInfo {
+  info [
+    "M0 inertia probe: reproduces the Atlas DEFAULT_PHYSICS nesting pattern"
+    "against a reference body carrying only the real segment inertia."
+  ]
+  basicTimeStep 8
+  gravity 0
+}
+Viewpoint {
+  orientation -0.3 -0.3 0.9 1.9
+  position 1.6 1.6 1.0
+}
+Background {
+  skyColor [
+    0.15 0.17 0.2
+  ]
+}
+Robot {
+  translation 0 0 0
+  children [
+    DEF PATTERN_JOINT HingeJoint {
+      jointParameters HingeJointParameters {
+        axis 0 1 0
+        anchor 0 0.4 0
+      }
+      device [
+        RotationalMotor {
+          name "pattern"
+          maxVelocity 100
+          maxTorque 1000
+        }
+        PositionSensor {
+          name "patternS"
+        }
+      ]
+      endPoint Solid {
+        translation 0 0.4 0
+        children [
+          Solid {
+            children [
+              Shape {
+                appearance PBRAppearance {
+                  baseColor 0.9 0.4 0.2
+                  roughness 0.6
+                }
+                geometry Box {
+                  size 0.26 0.124887 0.01
+                }
+              }
+            ]
+            name "pattern_inner"
+            boundingObject Box {
+              size 0.26 0.124887 0.01
+            }
+            physics Physics {
+              density -1
+              mass 0.817
+              centerOfMass [
+                0 0 0
+              ]
+              inertiaMatrix [
+                0.001 0.0035 0.004
+                0 0 0
+              ]
+            }
+          }
+        ]
+        name "pattern_outer"
+        physics Physics {
+          density -1
+          mass 0.001
+          centerOfMass [
+            0 0 0
+          ]
+          inertiaMatrix [
+            1 1 1
+            0 0 0
+          ]
+        }
+      }
+    }
+    DEF REFERENCE_JOINT HingeJoint {
+      jointParameters HingeJointParameters {
+        axis 0 1 0
+        anchor 0 -0.4 0
+      }
+      device [
+        RotationalMotor {
+          name "reference"
+          maxVelocity 100
+          maxTorque 1000
+        }
+        PositionSensor {
+          name "referenceS"
+        }
+      ]
+      endPoint Solid {
+        translation 0 -0.4 0
+        children [
+          Shape {
+            appearance PBRAppearance {
+              baseColor 0.3 0.7 0.9
+              roughness 0.6
+            }
+            geometry Box {
+              size 0.26 0.124887 0.01
+            }
+          }
+        ]
+        name "reference_body"
+        boundingObject Box {
+          size 0.26 0.124887 0.01
+        }
+        physics Physics {
+          density -1
+          mass 0.817
+          centerOfMass [
+            0 0 0
+          ]
+          inertiaMatrix [
+            0.001 0.0035 0.004
+            0 0 0
+          ]
+        }
+      }
+    }
+  ]
+  name "probe_rig"
+  controller "m0_inertia_probe"
+  supervisor TRUE
+}

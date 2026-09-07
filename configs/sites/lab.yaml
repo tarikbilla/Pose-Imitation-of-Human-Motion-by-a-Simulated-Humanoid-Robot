@@ -1,0 +1,15 @@
+name: lab
+description: >-
+  On-site laboratory rig described in docs/PRD.md. Sony A7 III on a tripod,
+  landscape orientation, fed into the host through an HDMI-to-USB capture
+  device (Elgato Cam Link 4K) that presents itself as a UVC camera. NVIDIA
+  GPU with CUDA. See docs/PORTING_LAB.md for the values that must be
+  confirmed on site before the first run.
+camera: sony_a7iii
+device: cuda
+device_fallback: cpu
+capture_backend: auto
+capture_device_hint: Cam Link
+pose_mode: lightweight
+body_height_m: 1.75
+environment: {}

@@ -1,0 +1,37 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "../protos/AtlasA3.proto"
+
+WorldInfo {
+  info [
+    "M3 upper-body imitation: arms, torso and head follow the streamed reference."
+  ]
+  CFM 1e-07
+  ERP 0.8
+  basicTimeStep 8
+  physicsDisableLinearThreshold 0
+  physicsDisableAngularThreshold 0
+  lineScale 0.25
+}
+Viewpoint {
+  orientation -0.13 -0.23 0.96 5.24
+  position -2.3 3.8 2.0
+}
+Background {
+  skyColor [
+    0.15 0.17 0.2
+  ]
+}
+DirectionalLight {
+  direction 0.5 -0.5 -1
+  intensity 3
+}
+Floor {
+  size 100 100
+}
+DEF ATLAS AtlasA3 {
+  translation 0 0 1
+  rotation 0 0 1 1.5708
+  controller "a3_upper_body"
+}

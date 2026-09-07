@@ -1,0 +1,29 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "../protos/AtlasA3.proto"
+
+WorldInfo {
+  info [
+    "M1 joint inertia A/B test, zero gravity."
+  ]
+  CFM 1e-07
+  ERP 0.8
+  basicTimeStep 8
+  gravity 0
+  physicsDisableLinearThreshold 0
+  physicsDisableAngularThreshold 0
+}
+Viewpoint {
+  orientation -0.13 -0.23 0.96 5.24
+  position -2.3 3.8 2.0
+}
+Background {
+  skyColor [
+    0.15 0.17 0.2
+  ]
+}
+DEF ATLAS AtlasA3 {
+  translation 0 0 1
+  name "AtlasA3"
+  controller "m1_joint_inertia"
+}
