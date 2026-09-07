@@ -1,0 +1,94 @@
+source: webots R2025a projects/robots/boston_dynamics/atlas/protos/Atlas.proto
+extracted: 2026-09-03
+total_mass_kg: 89.00
+
+geometry:
+  hip_lateral_offset_m: 0.089
+  thigh_length_m: 0.374
+  shank_length_m: 0.422
+  hip_to_sole_m: 0.922
+  foot_sole_box_m: [0.26, 0.124887, 0.01]
+  foot_sole_offset_m: [0.048, 0.0, -0.076119]
+  foot_toe_ahead_m: 0.178
+  foot_heel_behind_m: 0.082
+
+default_physics_node:
+  mass: 0.001
+  inertia_matrix: [1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+  center_of_mass: [0.0, 0.0, 0.0]
+  reused_count: 28
+  status: suspect_verify_in_m0
+
+joints:
+  LLegUhz: {axis: [0, 0, 1], anchor: [0.0, 0.089, 0.0], min: -0.32, max: 1.14, torque: 110}
+  LLegMhx: {axis: [1, 0, 0], anchor: [0.0, 0.0, 0.0], min: -0.47, max: 0.495, torque: 180}
+  LLegLhy: {axis: [0, 1, 0], anchor: [0.05, 0.0, -0.05], min: -1.75, max: 0.524, torque: 260}
+  LLegKny: {axis: [0, 1, 0], anchor: [-0.05, 0.0, -0.374], min: 0.0, max: 2.45, torque: 220}
+  LLegUay: {axis: [0, 1, 0], anchor: [0.0, 0.0, -0.422], min: -0.698, max: 0.698, torque: 220}
+  LLegLax: {axis: [1, 0, 0], anchor: [0.0, 0.0, 0.0], min: -0.436, max: 0.436, torque: 90}
+  RLegUhz: {axis: [0, 0, 1], anchor: [0.0, -0.089, 0.0], min: -1.14, max: 0.32, torque: 260}
+  RLegMhx: {axis: [1, 0, 0], anchor: [0.0, 0.0, 0.0], min: -0.495, max: 0.47, torque: 180}
+  RLegLhy: {axis: [0, 1, 0], anchor: [0.05, 0.0, -0.05], min: -1.745, max: 0.524, torque: 260}
+  RLegKny: {axis: [0, 1, 0], anchor: [-0.05, 0.0, -0.374], min: 0.0, max: 2.45, torque: 220}
+  RLegUay: {axis: [0, 1, 0], anchor: [0.0, 0.0, -0.422], min: -0.698, max: 0.698, torque: 220}
+  RLegLax: {axis: [1, 0, 0], anchor: [0.0, 0.0, 0.0], min: -0.436, max: 0.436, torque: 90}
+  LArmUsy: {axis: [0, 0.5, 0.866025], anchor: [0.024, 0.221, 0.289], min: -1.9635, max: 1.9635, torque: 212}
+  LArmShx: {axis: [1, 0, 0], anchor: [0.0, 0.075, 0.036], min: -1.39626, max: 1.74533, torque: 170}
+  LArmEly: {axis: [0, 1, 0], anchor: [0.0, 0.185, 0.0], min: 0.0, max: 3.14159, torque: 114}
+  LArmElx: {axis: [1, 0, 0], anchor: [0.0, 0.121, 0.013], min: 0.0, max: 2.35619, torque: 114}
+  LArmUwy: {axis: [0, 1, 0], anchor: [0.0, 0.188, -0.013], min: -1.571, max: 1.571, torque: 114}
+  LArmMwx: {axis: [1, 0, 0], anchor: [0.0, 0.058, 0.0], min: -0.436, max: 1.571, torque: 60}
+  RArmUsy: {axis: [0, 0.5, -0.866025], anchor: [0.024, -0.221, 0.289], min: -1.9635, max: 1.9635, torque: 212}
+  RArmShx: {axis: [1, 0, 0], anchor: [0.0, -0.075, 0.036], min: -1.74533, max: 1.39626, torque: 170}
+  RArmEly: {axis: [0, 1, 0], anchor: [0.0, -0.185, 0.0], min: 0.0, max: 3.14159, torque: 114}
+  RArmElx: {axis: [1, 0, 0], anchor: [0.0, -0.121, 0.013], min: -2.35619, max: 0.0, torque: 114}
+  RArmUwy: {axis: [0, 1, 0], anchor: [0.0, -0.188, -0.013], min: -1.571, max: 1.571, torque: 114}
+  RArmMwx: {axis: [1, 0, 0], anchor: [0.0, -0.058, 0.0], min: -1.571, max: 0.436, torque: 60}
+  BackLbz: {axis: [0, 0, 1], anchor: [-0.0125, 0.0, 0.0], min: -0.610865, max: 0.610865, torque: 124.016}
+  BackMby: {axis: [0, 1, 0], anchor: [0.0, 0.0, 0.09], min: -1.2, max: 1.28, torque: 206.843}
+  BackUbx: {axis: [1, 0, 0], anchor: [0.0, 0.0, 0.05], min: -0.790809, max: 0.790809, torque: 94.91}
+  NeckAy: {axis: [0, 1, 0], anchor: [0.01, 0.0, 0.43], min: -0.610865238, max: 1.13446401, torque: 5}
+
+max_velocity_all_joints: 12.0
+
+segments:
+  PelvisSolid: {mass: 14.2529, com: [0.0111, 0.0, 0.0271], inertia: [0.1244, 0.0958, 0.1167, 0.0008, -0.0007, -0.0005]}
+  LtorsoSolid: {mass: 1.92, inertia: [0.0039092, 0.00341694, 0.00174492]}
+  MtorsoSolid: {mass: 0.55, inertia: [0.000454181, 0.000483282, 0.000444215]}
+  UtorsoSolid: {mass: 18.484, com: [0.02, -0.001, 0.211], inertia: [0.395, 1.089, 0.327]}
+  LClavSolid: {mass: 2.369, inertia: [0.004, 0.006, 0.007]}
+  LScapSolid: {mass: 2.707, inertia: [0.01, 0.005, 0.013]}
+  LUarmSolid: {mass: 1.881, com: [0.007, 0.114, 0.008], inertia: [0.002, 0.003, 0.003]}
+  LLarmSolid: {mass: 2.148, inertia: [0.005, 0.003, 0.006]}
+  LFarmSolid: {mass: 0.981, inertia: [0.003, 0.001, 0.003]}
+  LHandSolid: {mass: 2.263, inertia: [0.01, 0.002, 0.01]}
+  RClavSolid: {mass: 2.369, inertia: [0.004, 0.006, 0.007]}
+  RScapSolid: {mass: 2.707, inertia: [0.01, 0.005, 0.013]}
+  RUarmSolid: {mass: 1.881, inertia: [0.002, 0.003, 0.003]}
+  RLarmSolid: {mass: 2.148, inertia: [0.005, 0.003, 0.006]}
+  RFarmSolid: {mass: 0.981, inertia: [0.003, 0.001, 0.003]}
+  RHandSolid: {mass: 2.263, inertia: [0.01, 0.002, 0.01]}
+  LUglutSolid: {mass: 0.5166, inertia: [0.00074276, 0.000688179, 0.00041242]}
+  LLglutSolid: {mass: 0.69, inertia: [0.000691326, 0.00126856, 0.00106487]}
+  LUlegSolid: {mass: 7.34, com: [0.0, 0.0, -0.21], inertia: [0.09, 0.09, 0.02]}
+  LLlegSolid: {mass: 4.367, com: [0.001, 0.0, -0.187], inertia: [0.077, 0.076, 0.01]}
+  LTalusSolid: {mass: 0.817, inertia: [0.001, 0.0035, 0.004]}
+  LFootSolid: {mass: 0.817, com: [0.027, 0.0, -0.067], inertia: [0.001, 0.0035, 0.004]}
+  RUglutSolid: {mass: 0.5166, inertia: [0.00074276, 0.000688179, 0.00041242]}
+  RLglutSolid: {mass: 0.69, inertia: [0.000691326, 0.00126856, 0.00106487]}
+  RUlegSolid: {mass: 7.34, inertia: [0.09, 0.09, 0.02]}
+  RLlegSolid: {mass: 4.367, inertia: [0.077, 0.076, 0.01]}
+  RTalusSolid: {mass: 0.817, inertia: [0.001, 0.0035, 0.004]}
+  RFootSolid: {mass: 0.817, com: [0.027, 0.0, -0.067], inertia: [0.001, 0.0035, 0.004]}
+
+leg_chain: [Uhz, Mhx, Lhy, Kny, Uay, Lax]
+arm_chain: [Usy, Shx, Ely, Elx, Uwy, Mwx]
+torso_chain: [BackLbz, BackMby, BackUbx]
+
+sensors_present_in_stock_proto:
+  position_sensor: 0
+  inertial_unit: 0
+  gyro: 0
+  accelerometer: 0
+  touch_sensor: 0
+  camera: 0

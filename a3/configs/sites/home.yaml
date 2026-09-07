@@ -1,0 +1,13 @@
+name: home
+description: >-
+  Home-office rig. Logitech Brio 100 on a desk stand, portrait orientation,
+  AMD Radeon RX 6800 XT driven through DirectML. This is the setup every
+  measurement in docs/FINDINGS.md was taken on.
+camera: brio100
+device: dml
+device_fallback: cpu
+capture_backend: dshow
+capture_device_hint: Brio
+pose_mode: lightweight
+body_height_m: 1.75
+environment: {}

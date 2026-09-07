@@ -1,0 +1,13 @@
+numpy>=1.26,<2.0
+opencv-python>=4.10
+onnxruntime-directml>=1.19
+onnx>=1.16
+pyyaml>=6.0
+
+# Home-office / AMD variant. For the NVIDIA laboratory rig use
+# requirements-cuda.txt INSTEAD of this file, never alongside it.
+#
+# rtmlib is installed separately with --no-deps by tools/setup_env.py.
+# Installing it normally pulls in plain `onnxruntime`, which silently replaces
+# `onnxruntime-directml` and removes DmlExecutionProvider. The pipeline then
+# runs on CPU with no error, roughly 8x slower.

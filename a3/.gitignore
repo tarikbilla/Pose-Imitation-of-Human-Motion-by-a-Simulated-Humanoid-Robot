@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+results/
+models/
+recordings/*.mp4
+recordings/*.mov
+recordings/*.mkv
+recordings/*.avi
+webots/controllers/*/runtime.ini
+
+.*.wbproj

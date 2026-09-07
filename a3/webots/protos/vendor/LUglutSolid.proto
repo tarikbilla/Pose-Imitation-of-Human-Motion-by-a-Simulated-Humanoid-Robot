@@ -1,0 +1,47 @@
+#VRML_SIM R2025a utf8
+# license: Copyright Cyberbotics Ltd. Licensed for use only with Webots.
+# license url: https://cyberbotics.com/webots_assets_license
+# tags: hidden
+# Extracted from:
+# https://bitbucket.org/osrf/drcsim/src/c69ecab26a55/ros/atlas_description/urdf/atlas_simple_shapes.urdf
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/boston_dynamics/atlas/protos/LUglutMesh.proto"
+
+PROTO LUglutSolid [
+  field SFVec3f    translation 0 0 0
+  field SFRotation rotation  0 0 1 0
+]
+{
+Solid {
+  translation IS translation
+  rotation IS rotation
+  children [
+    LUglutMesh {
+    }
+  ]
+  name "LUglut"
+  boundingObject Group {
+    children [
+      Pose {
+        rotation -0.0004 1 0.0004 1.5708
+        children [
+          Cylinder {
+            radius 0.019096
+            height 0.078396
+          }
+        ]
+      }
+      Cylinder {
+        radius 0.019841
+        height 0.080842
+      }
+    ]
+  }
+  physics Physics {
+    density -1
+    mass 1.65524
+    centerOfMass 0.00529262 -0.00344732 0.00313046
+    inertiaMatrix [ 0.00237989 0.002205 0.00132144 -1.2163e-07 -8.95706e-05 -1.04887e-07 ]
+  }
+}
+}

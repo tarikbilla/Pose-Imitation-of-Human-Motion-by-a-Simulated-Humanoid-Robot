@@ -1,0 +1,66 @@
+#VRML_SIM R2025a utf8
+# license: Copyright Cyberbotics Ltd. Licensed for use only with Webots.
+# license url: https://cyberbotics.com/webots_assets_license
+# tags: hidden
+# Extracted from:
+# https://bitbucket.org/osrf/drcsim/src/c69ecab26a55/ros/atlas_description/urdf/atlas_simple_shapes.urdf
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/boston_dynamics/atlas/protos/PelvisMesh.proto"
+
+PROTO PelvisSolid [
+  field SFVec3f    translation 0 0 0
+  field SFRotation rotation  0 0 1 0
+]
+{
+Solid {
+  translation IS translation
+  rotation IS rotation
+  children [
+    PelvisMesh {
+    }
+  ]
+  name "pelvis"
+  boundingObject Group {
+    children [
+      Pose {
+        translation 0.046 0.0 -0.02
+        rotation 1 0 0 1.5708
+        children [
+          Cylinder {
+            radius 0.092
+            height 0.03
+          }
+        ]
+      }
+      Pose {
+        translation -0.03 0.0 -0.02
+        rotation 1 0 0 1.5708
+        children [
+          Cylinder {
+            radius 0.092
+            height 0.03
+          }
+        ]
+      }
+      Pose {
+        translation 0 0.042 0.06
+        children [
+          Cylinder {
+            radius 0.130
+            height 0.022
+          }
+        ]
+      }
+      Pose {
+        translation 0 -0.042 0.06
+        children [
+          Cylinder {
+            radius 0.130
+            height 0.022
+          }
+        ]
+      }
+    ]
+  }
+}
+}
