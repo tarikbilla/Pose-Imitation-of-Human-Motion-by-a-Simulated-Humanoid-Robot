@@ -43,6 +43,7 @@ class WebotsBridge:
         command: JointCommand,
         keypoints: dict[str, Keypoint] | None = None,
         gait: dict[str, object] | None = None,
+        action: dict[str, object] | None = None,
     ) -> bytes:
         payload: dict[str, object] = {
             "timestamp_s": command.timestamp_s,
@@ -59,6 +60,13 @@ class WebotsBridge:
             # Compact walk command (cadence/phase/swing/stop) for the on-robot
             # gait engine. Additive and optional: older controllers ignore it.
             payload["gait"] = gait
+        if action is not None:
+            # Which lower-body CLIP the human is asking for, plus the evidence
+            # behind it (see src/perception/action_cues.py). Separate from
+            # "gait" on purpose: gait answers "is there a marching rhythm" from
+            # a periodic proxy, this answers "what is this person doing" from
+            # measured travel. Additive and optional, like gait.
+            payload["action"] = action
         return json.dumps(payload).encode("utf-8")
 
     def send_joint_command(self, command: JointCommand) -> None:
@@ -70,6 +78,7 @@ class WebotsBridge:
         command: JointCommand,
         keypoints: dict[str, Keypoint] | None = None,
         gait: dict[str, object] | None = None,
+        action: dict[str, object] | None = None,
     ) -> None:
         """Send joint angles plus raw landmarks (full-body retargeting) and an
         optional gait command (real-time walking).
@@ -78,7 +87,8 @@ class WebotsBridge:
         ``joint_angles_rad`` when no landmarks are present; ``gait`` drives the
         on-robot walk engine and is ignored by builds that don't support it.
         """
-        self._sock.sendto(self._encode(command, keypoints, gait), (self.host, self.port))
+        self._sock.sendto(self._encode(command, keypoints, gait, action),
+                          (self.host, self.port))
 
     def close(self) -> None:
         self._sock.close()

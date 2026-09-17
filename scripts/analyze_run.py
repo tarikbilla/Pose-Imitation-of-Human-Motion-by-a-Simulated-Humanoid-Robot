@@ -1035,6 +1035,106 @@ def check_abandoned_prepares(rows, out):
         f"prepare timeout or a leg joint fighting another layer."))
 
 
+def check_responsiveness(rows, out):
+    """THE KPI: how much of the run did the robot actually follow the human?
+
+    This project's own headline complaint -- "the robot responds 5-7 s late" --
+    was never a latency figure. Measured end to end by cross-correlating the
+    pose log against this one, the imitation loop is ~350 ms (190 ms camera to
+    command, 150 ms command to measured angle). What the user was watching was
+    COMMITMENT: while a locomotion clip owns the 12 leg joints, the human's legs
+    are not in the loop at all, and in log 1788865278 that was true for 71.8% of
+    the session in episodes averaging 6.84 s. Between clips the legs followed
+    the human for a median of 0.71 s.
+
+    So the number to watch is not milliseconds, it is this. Printed on every run
+    because a latency fix that does not move it has not fixed what people feel.
+    Arms and head keep tracking throughout, so this is a legs-only measure.
+    """
+    modes = [r.get("leg_mode", "") or "" for r in rows]
+    if not modes or not any(modes):
+        return
+    times = col(rows, "wall_time_s")
+    clock = "wall"
+    if len(times) != len(rows):
+        times = [num(r, "sim_time_s") or 0.0 for r in rows]
+        clock = "sim"
+    # Only ticks with a LIVE pose count. A controller left running after the
+    # perception pipeline exits sits in leg_mode 'pose' forever with nothing to
+    # follow, and including those made this read 95% on a log whose tracked
+    # window was 25%. stale==1 means no pose arrived within STALE_AFTER_S.
+    live = [i for i, r in enumerate(rows) if (num(r, "stale") or 0.0) < 0.5]
+    if len(live) < 50:
+        out.append(finding("INFO", "no tracked window in this log",
+                           "every frame is stale: the perception pipeline was "
+                           "not feeding this controller, so there is no "
+                           "responsiveness to measure."))
+        return
+    following = sum(1 for i in live if modes[i].startswith("pose"))
+    share = pct(following, len(live))
+
+    # Split the live ticks into CONTIGUOUS tracked segments. A long log can hold
+    # several sessions separated by minutes of staleness, and an episode that is
+    # still open at a segment boundary would otherwise be measured across the
+    # gap -- which read as a 149 s commitment on a 235 s window. A stale tick
+    # also genuinely ends a commitment: the layers stand down when tracking is
+    # lost, so there is nothing to be committed to.
+    segments = []
+    run = [live[0]]
+    for prev, cur in zip(live, live[1:], strict=False):
+        if cur == prev + 1:
+            run.append(cur)
+        else:
+            segments.append(run)
+            run = [cur]
+    segments.append(run)
+    segments = [seg for seg in segments if len(seg) >= 25]
+    if not segments:
+        out.append(finding("INFO", "no continuous tracked window in this log",
+                           "tracking never held long enough to measure."))
+        return
+    tracked_s = sum(times[seg[-1]] - times[seg[0]] for seg in segments)
+
+    episodes = []
+    for seg in segments:
+        seg_start = None
+        for index in seg:
+            mode = modes[index]
+            busy = bool(mode) and not mode.startswith("pose")
+            if busy and seg_start is None:
+                seg_start = index
+            elif not busy and seg_start is not None:
+                episodes.append(times[index] - times[seg_start])
+                seg_start = None
+        if seg_start is not None:
+            episodes.append(times[seg[-1]] - times[seg_start])
+    if not episodes:
+        out.append(finding("INFO", f"legs followed the human {share:.0f}% of the run",
+                           f"no locomotion episode in {tracked_s:.0f}s of tracking."))
+        return
+
+    episodes.sort()
+    mean = sum(episodes) / len(episodes)
+    median = episodes[len(episodes) // 2]
+    longest = episodes[-1]
+    over5 = sum(1 for e in episodes if e >= 5.0)
+    # A human notices a delay past roughly 150 ms and reads a second as broken;
+    # a mean commitment past 3 s is what "it ignores me" looks like.
+    sev = "CRITICAL" if mean >= 5.0 else ("WARNING" if mean >= 2.0 else "INFO")
+    out.append(finding(
+        sev, f"legs followed the human {share:.0f}% of the run; "
+             f"mean commitment episode {mean:.2f}s",
+        f"{len(episodes)} episodes where a clip owned the legs, over a "
+        f"{tracked_s:.0f}s tracked window ({clock} clock): "
+        f"mean {mean:.2f}s, median {median:.2f}s, longest {longest:.2f}s, "
+        f"{over5} of them >= 5s. While one runs the human's LEGS are out of the "
+        f"loop (arms and head keep tracking). Baseline to beat, log 1788865278: "
+        f"25% following, 6.84s mean, 9 episodes >= 6s. Shorten these by making "
+        f"the cue let go sooner (walk.stop_window_s), the walk latch shorter "
+        f"(WALK_LATCH_RELEASE_S) and the clip exit cheaper to reach, not by "
+        f"speeding up the camera -- the camera was never the problem."))
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1076,6 +1176,7 @@ def main(argv=None) -> int:
                   check_sole_contact, check_shifter_saturation, check_tilt_sign_consistency,
                   check_lateral_rocking, check_episode_starts, check_locomotion_chain,
                   check_gait_cycle, check_walk_speed, check_abandoned_prepares,
+                  check_responsiveness,
                   check_leg_layer, check_tilt,
                   check_saturation, check_tracking, check_head, check_heading):
         try:

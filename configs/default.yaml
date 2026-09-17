@@ -20,9 +20,24 @@ pose:
   # or "metrabs_mob3s_y4"/"metrabs_rn18_y4" (faster, less accurate) -- see
   # https://github.com/isarandi/metrabs/blob/master/docs/MODELS_6_DATASETS.md
   model_url: "https://omnomnom.vision.rwth-aachen.de/data/metrabs/metrabs_eff2s_y4.zip"
-  # Skeleton joint convention MeTRAbs should output. coco_19 is the closest
-  # match to the joint set this project uses (no SMPL spine/hand joints).
-  skeleton: coco_19
+  # Skeleton joint convention MeTRAbs should output.
+  #
+  # "" is the model's FULL 122-joint superset, and it is the default because the
+  # hand markers live only there: NAO's WristYaw and its sixteen finger motors
+  # have nothing to track without a thumb and a finger point. (ElbowYaw does not
+  # need them -- the forearm's own direction fixes it -- so that one works under
+  # coco_19 too.)
+  #
+  # It costs nothing. Every named skeleton is a plain index gather out of this
+  # superset, measured at 152.1 ms/call against coco_19's 152.4 ms, so the
+  # argument selects joints rather than changing the inference. And it moves
+  # nothing: src/perception/landmarks.py pins each of the 19 body landmarks to
+  # the exact superset joint coco_19 selects (they are the `_cmu_panoptic`
+  # markers, NOT the same-named SMPL joints a few centimetres away -- see "THE
+  # ALIAS TRAP" there, and tests/test_landmarks.py, which pins it).
+  #
+  # Set back to coco_19 to drop hand tracking; nothing else changes.
+  skeleton: ""
   # Field of view (degrees, along the larger image side) assumed for an
   # uncalibrated webcam -- used both for MeTRAbs' own inference and for
   # projecting 3D points back to pixels for the HUD overlay. A rough guess,
@@ -138,9 +153,27 @@ walk:
   # not the amplitude and not the confidence, held "march" to 1.1% of frames and
   # made walking impossible to request. At 3.0 s the floor drops to 0.167 Hz.
   cross_window_s: 3.0
+  # Amplitude window for the STOP decision, and so the stop latency itself:
+  # max-min cannot fall until the window has emptied of motion. Split from
+  # cue_window_s because starting and stopping want opposite things -- starting
+  # wants long evidence, stopping wants none. Measured by replaying
+  # logs/run_20260908_130043 against acausal ankle-speed ground truth, this one
+  # number moved the mean stop latency 1210 -> 487 ms and false-march time
+  # 51.4 -> 34.2 s. DO NOT lower it below 0.8: at 0.6 and under it starts
+  # reading mid-stride as a stop and chops one walk into 1.5-1.8 pieces, each
+  # costing a clip restart, a prepare ramp and a clip->pose handover. See the
+  # table in GaitCueExtractor's docstring.
+  stop_window_s: 0.8
   amp_start: 0.08      # normalized knee-swing amplitude to START marching
   amp_stop: 0.05       # below this -> STOP (hysteresis; bias to standing still)
   cue_conf_min: 0.6    # min visible lower-body fraction to trust a gait reading
+  # Consecutive low-confidence frames tolerated before the cadence evidence is
+  # thrown away. cue_conf_min is compared against a QUANTISED visibility
+  # fraction, so a single mis-detected ankle used to wipe the crossing history
+  # and force the robot to re-earn the two-crossing start gate (~1.7 s) -- the
+  # "walks, stops, walks again" stutter. Idle is still reported on every such
+  # frame; only the forgetting waits.
+  cue_conf_grace_frames: 2
 
 logging:
   output_dir: logs

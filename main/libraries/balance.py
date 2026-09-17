@@ -474,6 +474,51 @@ def clip_torso_speeds(poses: Sequence[tuple[float, dict[str, float]]],
     return speeds
 
 
+def clip_torso_yaw(poses: Sequence[tuple[float, dict[str, float]]],
+                   model: "NaoCoMModel | None" = None) -> list[float]:
+    """Cumulative torso yaw (rad) the clip itself commands, per keyframe.
+
+    The rotational twin of :func:`clip_torso_speeds`, and odometry for the same
+    reason: the stance foot is planted, so whatever yaw forward kinematics puts
+    between the torso and that sole is yaw the robot has actually turned
+    through. Positive is the robot's own LEFT, matching
+    ``walk_motion.motion_nominal_yaw``.
+
+    This is what makes a turn clip measurable rather than merely named. The
+    filename says ``TurnLeft180``; the keyframes say +184.0 deg, delivered at a
+    steady 24 deg/s between t=1.2 s and t=8.8 s. Knowing the SHAPE of that -- not
+    just the total -- is what lets a turn be stopped part-way at a chosen angle
+    instead of being played whole, which is the difference between turning 90 deg
+    in one clip and turning it in three.
+
+    Only intervals with the SAME stance foot contribute, exactly as in
+    :func:`clip_torso_speeds`: across a stance exchange the reference sole
+    changes and the difference between the two yaw readings is a property of the
+    robot's stance width, not of any rotation it performed.
+    """
+    model = model or NaoCoMModel()
+    out: list[float] = []
+    total = 0.0
+    previous: float | None = None
+    last_stance: str | None = None
+    for _t, angles in poses:
+        frames = model.frames(angles)
+        lows = {side: float(model.foot_corners(side, frames)[:, 2].min())
+                for side in ("L", "R")}
+        stance = "L" if lows["L"] <= lows["R"] else "R"
+        # frames[...] is the sole's pose in the TORSO frame, so its transpose is
+        # the torso seen from the planted sole -- which is the world, for as long
+        # as that sole stays put.
+        rotation = frames[f"{stance}AnkleRoll"][:3, :3].T
+        yaw = float(np.arctan2(rotation[1, 0], rotation[0, 0]))
+        if last_stance == stance and previous is not None:
+            total += float((yaw - previous + np.pi) % (2.0 * np.pi) - np.pi)
+        previous = yaw
+        last_stance = stance
+        out.append(total)
+    return out
+
+
 def safe_exit_times(poses: Sequence[tuple[float, dict[str, float]]],
                     max_joint_speed: float = 3.0,
                     max_sole_spread: float = 0.004,

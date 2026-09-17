@@ -35,7 +35,11 @@ import cv2
 import numpy as np
 
 from src.perception import metrabs_model
-from src.perception.landmarks import POSE_LANDMARKS, build_raw_to_canonical_map
+from src.perception.landmarks import (
+    OPTIONAL_LANDMARKS,
+    REQUIRED_LANDMARKS,
+    build_raw_to_canonical_map,
+)
 from src.type_defs import Keypoint, PoseFrame
 
 logger = logging.getLogger(__name__)
@@ -129,7 +133,20 @@ class PoseEstimator:
         self._raw_names = list(info.names)
         self._raw_to_canonical = build_raw_to_canonical_map(self._raw_names)
         matched_canonical = set(self._raw_to_canonical.values())
-        missing = [n for n in POSE_LANDMARKS if n not in matched_canonical]
+        # The hand markers exist only in the 122-joint superset, so their
+        # absence is a capability report, not a misconfiguration: coco_19 is
+        # still a perfectly good body skeleton and the robot's hand joints
+        # simply go untracked, exactly as they did before hands were added.
+        absent_hands = [n for n in OPTIONAL_LANDMARKS if n not in matched_canonical]
+        if absent_hands:
+            logger.warning(
+                "Skeleton '%s' has no hand landmarks (%s), so NAO's ElbowYaw, "
+                "WristYaw and finger joints will not be driven. Set "
+                "pose.skeleton to \"\" (the 122-joint superset) for hand "
+                "tracking -- it costs no extra inference time.",
+                self.skeleton, ", ".join(sorted(absent_hands)),
+            )
+        missing = [n for n in REQUIRED_LANDMARKS if n not in matched_canonical]
         if missing:
             msg = (
                 f"MeTRAbs skeleton '{self.skeleton}' joint names did not match "

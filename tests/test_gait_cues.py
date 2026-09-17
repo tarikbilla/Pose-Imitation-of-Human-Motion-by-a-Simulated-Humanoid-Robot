@@ -403,3 +403,91 @@ def test_the_cue_channel_reaches_the_wire() -> None:
         cmd = ex.update(frame)
     assert "cue_channel" in cmd.as_dict()
     assert cmd.as_dict()["cue_channel"] in ("knee", "stride", "none")
+
+
+# ---------------------------------------------------------------------------
+# Responsiveness: how fast the cue starts, and how fast it lets go.
+#
+# These pin the 2026-09-10 latency work. The complaint was "the robot takes 5-7 s
+# to start walking, 5-7 s to stop, and sometimes walks when I am standing still".
+# Two of those three are this file's responsibility.
+# ---------------------------------------------------------------------------
+def _time_to_idle(ex: GaitCueExtractor, *, start_t: float, limit_s: float = 4.0):
+    """Seconds of stillness before the cue reports idle, or None if it never does."""
+    t = start_t
+    idx = 0
+    while t < start_t + limit_s:
+        cmd = ex.update(_still_frame(t, idx))
+        if cmd.state == "idle":
+            return t - start_t
+        dt = 0.03 if idx % 2 == 0 else 0.05
+        t += dt
+        idx += 1
+    return None
+
+
+def test_the_stop_decision_does_not_wait_for_the_amplitude_window() -> None:
+    """Stopping must be governed by stop_window_s, not by cue_window_s.
+
+    ``amplitude()`` is ``max - min`` over a window, so it cannot fall until the
+    whole window has emptied of motion -- which makes the amplitude window the
+    stop latency. Measured against a replay of logs/run_20260908_130043, sharing
+    the 1.3 s window cost a 1210 ms mean stop; giving the stop test its own
+    0.8 s window cut that to 487 ms.
+    """
+    ex = GaitCueExtractor(stop_window_s=0.8)
+    _feed(ex, lambda t, i: _march_frame(t, i, freq_hz=1.0), duration_s=4.0)
+    quick = _time_to_idle(ex, start_t=4.0)
+
+    slow_ex = GaitCueExtractor(stop_window_s=1.3)   # the old shared-window behaviour
+    _feed(slow_ex, lambda t, i: _march_frame(t, i, freq_hz=1.0), duration_s=4.0)
+    slow = _time_to_idle(slow_ex, start_t=4.0)
+
+    assert quick is not None and slow is not None
+    assert quick < slow, "the shorter stop window must stop sooner"
+    assert quick <= 0.9, f"stop took {quick:.2f}s; the 0.8s window should beat that"
+
+
+def test_stop_window_is_never_longer_than_the_amplitude_window() -> None:
+    """A stop window past the history window would read dropped samples."""
+    ex = GaitCueExtractor(window_s=0.7, stop_window_s=1.3)
+    assert ex.stop_window_s <= ex.window_s
+
+
+def test_a_single_low_confidence_frame_does_not_reset_the_cadence() -> None:
+    """One mis-detected ankle must not cost the whole start gate again.
+
+    ``conf`` is a quantised visibility fraction, so a single bad frame in an
+    otherwise clean walk drops it under ``conf_min``. Wiping the crossing
+    history there made the robot re-earn ``start_cycles`` (~1.7 s) after every
+    blink, which is the "walks, stops, walks again" stutter.
+    """
+    ex = GaitCueExtractor()
+    marching = _feed(ex, lambda t, i: _march_frame(t, i, freq_hz=1.0), duration_s=4.0)
+    assert marching.state == "march", "precondition: the cue is marching"
+
+    # One blink: legs invisible for a single frame.
+    blink = ex.update(_march_frame(4.0, 999, leg_vis=0.1))
+    assert blink.state == "idle", "we must not assert a march we cannot see"
+
+    # The very next good frame resumes the march, without re-accumulating.
+    resumed = ex.update(_march_frame(4.04, 1000, freq_hz=1.0))
+    assert resumed.state == "march", "a one-frame blink cost the whole start gate"
+
+
+def test_a_sustained_loss_of_the_legs_still_forgets_the_cadence() -> None:
+    """The grace is for blinks, not for a human who left. Past it, forget."""
+    ex = GaitCueExtractor(conf_grace_frames=2)
+    _feed(ex, lambda t, i: _march_frame(t, i, freq_hz=1.0), duration_s=4.0)
+    for i in range(6):                      # well past conf_grace_frames
+        ex.update(_march_frame(4.0 + 0.04 * i, 900 + i, leg_vis=0.1))
+    # Cadence evidence is gone, so one good frame cannot resurrect the march.
+    assert ex.update(_march_frame(4.4, 950, freq_hz=1.0)).state == "idle"
+
+
+def test_arm_swing_still_rejected_with_the_shorter_stop_window() -> None:
+    """The stop-side change must not have loosened the START side (symptom 3)."""
+    ex = GaitCueExtractor(stop_window_s=0.8, conf_grace_frames=2)
+    cmd = _feed(ex, lambda t, i: _still_frame(t, i, arm_swing=True), duration_s=4.0)
+    assert cmd.state == "idle"
+    assert cmd.cadence_hz == 0.0

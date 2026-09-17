@@ -729,3 +729,248 @@ def test_the_cycled_window_stays_within_the_motors_declared_speed() -> None:
     speed, cap, _joint, _t = over[0]
     assert speed / cap < 1.01
     assert (speed - cap) * 0.04 < 0.002
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-10 live test: "the robot turned left fine, then never registered me
+# turning right". Both defects were in the heading path.
+# ---------------------------------------------------------------------------
+def test_a_mid_turn_confidence_dropout_does_not_move_the_origin() -> None:
+    """A yaw_conf dropout is CAUSED by turning, so it must not re-latch.
+
+    Body yaw is recovered from shoulder-line foreshortening, which is exactly
+    the measurement that degrades when the torso turns away from the camera. In
+    the live test yaw_conf sat under conf_min for 4.6 s mid-turn; at the old
+    relatch_after_s=2.0 the servo re-latched and the TURNED pose (-82.9 deg)
+    became the new "facing forward". Standing square to the camera then read as
+    a +36..+40 deg error, so the robot turned while the subject was still and
+    ignored their next real turn -- and it compounds, because every turn moves
+    the zero again.
+    """
+    servo = YawServo()
+    assert servo.relatch_after_s >= 5.0, (
+        "relatch_after_s must stay comfortably longer than a turn-induced "
+        "yaw_conf dropout (measured: 4.6 s)")
+    t = _latch(servo, 0.0, 0.0)
+    origin = servo._human_ref
+
+    # The subject turns 80 deg; confidence collapses for 4.6 s partway through.
+    servo.update(human_yaw=-1.40, conf=1.0, robot_yaw=0.0, now_s=t + 0.5)
+    for i in range(60):                       # 4.6 s of unusable yaw
+        servo.update(human_yaw=-1.40, conf=0.1, robot_yaw=0.0,
+                     now_s=t + 0.6 + 0.077 * i)
+    servo.update(human_yaw=-1.40, conf=1.0, robot_yaw=0.0, now_s=t + 5.3)
+
+    assert servo.latched, "the servo dropped its reference over a 4.6 s dropout"
+    assert servo._human_ref == origin, (
+        "the origin moved to the turned pose; facing the camera will now read "
+        "as a large heading error")
+    # Back square to the camera -> essentially nothing left to turn.
+    servo.update(human_yaw=0.0, conf=1.0, robot_yaw=0.0, now_s=t + 6.0)
+    assert abs(servo.error(0.0)) < 0.05, (
+        f"square to the camera reads {math.degrees(servo.error(0.0)):+.1f} deg "
+        f"of heading error")
+
+
+def test_a_genuine_departure_still_relatches() -> None:
+    """The longer timeout must not disable re-latching altogether."""
+    servo = YawServo()
+    t = _latch(servo, 0.0, 0.0)
+    servo.update(human_yaw=1.0, conf=1.0, robot_yaw=0.0,
+                 now_s=t + servo.relatch_after_s + 2.0)
+    assert not servo.latched
+    assert servo.error(0.0) == 0.0, "a stale error would spin the robot"
+
+
+def test_a_steady_rotation_counts_as_a_stable_heading() -> None:
+    """stable() must not reject the very motion that needs a turn.
+
+    Peak-to-peak alone cannot separate a NOISY yaw estimate from a TURNING one,
+    and rejecting both means refusing to turn while the subject rotates:
+    stability_spread_rad 0.5 rad over a 1.0 s window rejects anything above
+    29 deg/s, and a comfortable turn is faster. They are separable by SHAPE --
+    a rotation is monotone, the cue's noise signature is scatter.
+    """
+    servo = YawServo()
+    # 90 deg/s for a full window: way past the peak-to-peak limit, but a line.
+    for i in range(21):
+        t = 0.05 * i
+        servo.update(human_yaw=math.radians(90.0) * t, conf=1.0,
+                     robot_yaw=0.0, now_s=t)
+    spread = math.radians(90.0) * 1.0
+    assert spread > servo.stability_spread_rad, "precondition: spread is large"
+    assert servo.stable(), "a steady rotation was rejected as an unstable heading"
+
+
+def test_scatter_is_still_rejected_as_unstable() -> None:
+    """The documented failure mode -- yaw spiking to its bounds -- must fail."""
+    servo = YawServo()
+    for i in range(21):
+        t = 0.05 * i
+        servo.update(human_yaw=(math.radians(90.0) if i % 2 else math.radians(-90.0)),
+                     conf=1.0, robot_yaw=0.0, now_s=t)
+    assert not servo.stable(), "alternating +/-90 deg scatter was called stable"
+
+
+def test_a_noisy_ramp_is_rejected() -> None:
+    """A rotation buried in large scatter is not a heading worth turning on."""
+    servo = YawServo()
+    for i in range(21):
+        t = 0.05 * i
+        jitter = math.radians(25.0) * (1 if i % 2 else -1)
+        servo.update(human_yaw=math.radians(60.0) * t + jitter, conf=1.0,
+                     robot_yaw=0.0, now_s=t)
+    assert not servo.stable()
+
+
+# ---------------------------------------------------------------------------
+# Aimed turning: a clip that can be stopped part-way is planned differently
+# ---------------------------------------------------------------------------
+LADDER = {
+    "turn_left": "/w/TurnLeft40.motion",
+    "turn_right": "/w/TurnRight40.motion",
+    "turn_left_coarse": "/w/TurnLeft180.motion",
+    "turn_right_coarse": "/w/TurnRight180.motion",
+}
+STOPPABLE = frozenset(LADDER)
+
+
+def test_an_interruptible_turn_prefers_the_largest_clip() -> None:
+    """The inversion of the old rule, and the reason for it.
+
+    "Do not overshoot" is right for a clip played whole and wrong for one that
+    can be stopped at any of 133 certified keyframes. Once it can be stopped,
+    the big clip wins on every axis: 24 deg/s against 9, a 16 deg ladder of
+    deliverable angles against a single 40 deg step, and one clip instead of the
+    three-with-two-settles that a 90 deg turn used to cost.
+    """
+    for degrees in (30, 45, 90, 150):
+        plan = plan_action(yaw_error_rad=math.radians(degrees), available=LADDER,
+                           interruptible=STOPPABLE)
+        assert plan.action == "turn_left_coarse", degrees
+    # ... and the old rule is untouched for a clip that must be played whole.
+    assert plan_action(yaw_error_rad=math.radians(45),
+                       available=LADDER).action == "turn_left"
+
+
+def test_an_interruptible_turn_serves_errors_the_old_gate_refused() -> None:
+    """The dead band this closes, in the robot's own terms.
+
+    turn_start_rad admits a turn at 20 deg, but the smallest clip on disk could
+    not be fired without overshooting until 26 deg -- so a heading error between
+    the two was announced, ramped for, and then never served. That gate exists to
+    stop a clip overshooting, and a clip we can stop part-way cannot overshoot,
+    so it does not apply to one.
+    """
+    between = math.radians(23)
+    assert plan_action(yaw_error_rad=between, available=LADDER).action is None
+    assert plan_action(yaw_error_rad=between, available=LADDER,
+                       interruptible=STOPPABLE).is_turn
+
+
+def test_a_rotation_in_progress_is_not_handed_to_a_different_clip() -> None:
+    """Swapping clips mid-turn means releasing the body, settling, re-preparing
+    and starting again -- while half-turned. Whatever is turning us the right
+    way keeps the body until the direction changes or the heading is served."""
+    for degrees in (150, 90, 45, 20):
+        plan = plan_action(yaw_error_rad=math.radians(degrees), available=LADDER,
+                           interruptible=STOPPABLE, turning=True,
+                           playing="turn_left_coarse")
+        assert plan.action == "turn_left_coarse", degrees
+    # Direction still beats continuity: the human turning back the other way
+    # must not be answered by carrying on round.
+    plan = plan_action(yaw_error_rad=-math.radians(45), available=LADDER,
+                       interruptible=STOPPABLE, turning=True,
+                       playing="turn_left_coarse")
+    assert plan.action == "turn_right_coarse"
+
+
+def test_a_play_whole_turn_keeps_its_overshoot_floor_at_both_gates() -> None:
+    """The floor looks like lost responsiveness at the stop gate. It is not.
+
+    A 60 deg clip asked to correct a 17 deg residual turns the robot to -43 deg,
+    which is worse than where it started, and the next step asks for another
+    clip: a limit cycle. For a clip that must be played whole the floor is what
+    stops the loop at the finest error that clip can actually serve.
+    """
+    p = LocomotionParams()
+    whole = {"turn_left": "/w/TurnLeft60.motion",
+             "turn_right": "/w/TurnRight60.motion"}
+    residual = math.radians(17)
+    assert plan_action(yaw_error_rad=residual, available=whole, params=p,
+                       turning=True).action is None
+    # The same residual IS served when the clip can simply be stopped early.
+    assert plan_action(yaw_error_rad=residual, available=LADDER, params=p,
+                       interruptible=STOPPABLE, turning=True).is_turn
+
+
+def test_aiming_a_turn_beats_chaining_whole_clips(tmp_path) -> None:
+    """End to end, against the real clips: fewer clips, less time, less error.
+
+    This is the claim the change is worth making, so it is measured rather than
+    asserted -- replayed at the real 20 ms control step over the clips' own
+    keyframe kinematics.
+    """
+    motions = os.path.join(os.path.dirname(__file__), "..", "main", "controllers",
+                           "pose_imitation_controller", "motions")
+    files = find_motion_files([motions])
+    clips = {k: files[k] for k in
+             ("turn_left", "turn_right", "turn_left_coarse", "turn_right_coarse")
+             if k in files}
+    if len(clips) < 4:
+        pytest.skip("the turn clips are not installed")
+    from walk_motion import turn_schedule
+    schedules = {k: turn_schedule(v) for k, v in clips.items()}
+    if any(s is None for s in schedules.values()):
+        pytest.skip("no CoM model, so no clip can be aimed")
+    stoppable = frozenset(schedules)
+
+    def rotate(target_rad: float, *, aimed: bool) -> tuple[float, float, int]:
+        robot = elapsed = 0.0
+        played = 0
+        action = schedule = None
+        clock = base = start = 0.0
+        while elapsed < 90.0:
+            error = wrap_pi(target_rad - robot)
+            if action is None:
+                plan = plan_action(yaw_error_rad=error, available=clips,
+                                   interruptible=stoppable if aimed else None)
+                if not plan.is_turn:
+                    break
+                action, schedule = plan.action, schedules[plan.action]
+                clock = schedule.entry_s if aimed else 0.0
+                start, base = schedule.yaw_at(clock), robot
+                elapsed += 0.76          # prepare ramp + settle between clips
+                played += 1
+                continue
+            clock += 0.020
+            elapsed += 0.020
+            delivered = schedule.yaw_at(clock) - start
+            robot = base + delivered
+            error = wrap_pi(target_rad - robot)
+            if aimed:
+                ahead = [r for r in schedule.rungs if r[0] >= clock - 0.03]
+                done = (not ahead) or min(
+                    ahead, key=lambda r: abs((r[1] - start - delivered) - error)
+                )[0] <= clock + 0.03
+            else:
+                at_rung = any(abs(clock - r[0]) <= 0.03 for r in schedule.rungs)
+                done = at_rung and plan_action(
+                    yaw_error_rad=error, available=clips, turning=True,
+                ).action != action
+            if clock >= schedule.duration_s:
+                done = True
+            if done:
+                action = schedule = None
+        return elapsed, abs(wrap_pi(target_rad - robot)), played
+
+    for degrees in (45, 90, 120, 150, 180):
+        want = math.radians(degrees)
+        slow_t, slow_e, slow_n = rotate(want, aimed=False)
+        fast_t, fast_e, fast_n = rotate(want, aimed=True)
+        assert fast_n <= slow_n, degrees
+        assert fast_e <= slow_e + 1e-9, (degrees, math.degrees(fast_e),
+                                         math.degrees(slow_e))
+        assert fast_e <= math.radians(10.0), (degrees, math.degrees(fast_e))
+        if degrees >= 90:            # where chaining clips really hurt
+            assert fast_t < 0.75 * slow_t, (degrees, fast_t, slow_t)

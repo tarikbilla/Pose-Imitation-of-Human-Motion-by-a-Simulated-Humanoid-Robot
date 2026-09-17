@@ -291,7 +291,21 @@ class _Channel:
         return [v for ts, v in self.hist if ts >= newest - seconds]
 
     def amplitude(self) -> float:
-        vals = self._window(self.amp_window_s)
+        return self.amplitude_in(self.amp_window_s)
+
+    def amplitude_in(self, seconds: float) -> float:
+        """Peak-to-peak over the last ``seconds``.
+
+        Split out from :meth:`amplitude` because starting and stopping want
+        different windows. Starting wants the long one: it is the evidence that
+        a real gait is under way. Stopping wants the SHORTEST window that still
+        spans a half-step, because ``max - min`` cannot fall until the whole
+        window has emptied of motion -- so the amplitude window IS the stop
+        latency. Measured on the 2026-09-08 session, ``amp_window_s`` of 1.3 s
+        produced a 1218 ms mean stop latency, which is most of the "robot keeps
+        walking after I stop" complaint.
+        """
+        vals = self._window(seconds)
         if len(vals) < 3:
             return 0.0
         return max(vals) - min(vals)
@@ -341,6 +355,33 @@ class GaitCueExtractor:
         Number of consistent alternating half-steps (zero-crossings) required
         before we declare "march" (slow to start), while we drop to idle
         immediately when the amplitude collapses (instant to stop).
+    stop_window_s:
+        Amplitude window used for the STOP decision only, and therefore the
+        stop latency itself -- ``max - min`` cannot fall until the window has
+        emptied of motion. Do not lower this below ~0.8 s. Replayed against
+        logs/run_20260908_130043 (3351 frames, 24 ground-truth walking bouts
+        from acausal ankle speed), shortening it trades a faster stop for a
+        FRAGMENTED walk, and each fragment is a clip stop, a fresh prepare ramp
+        and another clip->pose handover -- the handover being what caused all
+        three falls in that session:
+
+            stop_window_s   stop latency   false march   march segments/bout
+            1.3 (was)         1210 ms        51.4 s          0.88
+            0.8 (now)          487 ms        34.2 s          0.96
+            0.6                177 ms        30.2 s          1.50   <-- chops
+            0.5                 71 ms        27.1 s          1.83   <-- chops
+
+        0.8 s is the knee of that curve: it nearly halves the stop latency and
+        removes a third of the false march while leaving continuity alone. A
+        genuine walk here has a half-step every 0.807-0.886 s, so a window much
+        under that cannot span one and starts reading mid-stride as a stop.
+    conf_grace_frames:
+        Consecutive sub-``conf_min`` frames tolerated before the cadence
+        evidence is discarded. ``conf`` is a quantised visibility fraction, so
+        one mis-detected ankle in an otherwise clean walk used to wipe
+        ``cross_times`` and make the robot re-earn the whole ``start_cycles``
+        gate (~1.7 s). Idle is still REPORTED on every low-confidence frame;
+        only the forgetting is delayed.
     """
 
     def __init__(
@@ -348,19 +389,26 @@ class GaitCueExtractor:
         *,
         window_s: float = 1.3,
         cross_window_s: float = 3.0,
+        stop_window_s: float = 0.8,
         amp_start: float = 0.08,
         amp_stop: float = 0.05,
         conf_min: float = 0.6,
         cadence_max_hz: float = 2.5,
         start_cycles: int = 2,
+        conf_grace_frames: int = 2,
     ) -> None:
         self.window_s = float(window_s)
         self.cross_window_s = float(cross_window_s)
+        # Never longer than the amplitude window: a stop window that outran it
+        # would read peak-to-peak over samples the channel has already dropped.
+        self.stop_window_s = min(float(stop_window_s), float(window_s))
         self.amp_start = float(amp_start)
         self.amp_stop = float(amp_stop)
         self.conf_min = float(conf_min)
         self.cadence_max_hz = float(cadence_max_hz)
         self.start_cycles = int(start_cycles)
+        self.conf_grace_frames = max(0, int(conf_grace_frames))
+        self._low_conf_run = 0
 
         # One channel per thing a human might be doing: marching on the spot
         # (knee-height differential) and actually walking (ankle separation along
@@ -390,9 +438,20 @@ class GaitCueExtractor:
 
         conf = self._confidence(kps)
         if conf < self.conf_min:
-            # Legs not reliably visible: reset cadence state, hold idle.
-            self._decay_to_idle()
+            # Legs not reliably visible: report idle for this frame -- we cannot
+            # assert a march we cannot see -- but do NOT throw the cadence
+            # evidence away on the strength of one bad frame. ``conf`` is a
+            # quantised visibility fraction, so a single mis-detected ankle
+            # drops it below ``conf_min`` for one frame in an otherwise clean
+            # walk, and wiping ``cross_times`` there made the robot re-pay the
+            # full two-crossing start gate (~1.7 s) after every blink. That is
+            # the "walks, stops, walks again" stutter. The controller's walk
+            # latch is what bridges these one-frame idles.
+            self._low_conf_run += 1
+            if self._low_conf_run > self.conf_grace_frames:
+                self._decay_to_idle()
             return GaitCommand("idle", 0.0, 0.0, 0, 0.0, turn, conf, yaw, yaw_conf)
+        self._low_conf_run = 0
 
         t = pose.timestamp_s
         scale = self._body_scale(kps)
@@ -412,13 +471,22 @@ class GaitCueExtractor:
 
         if self._state == "march":
             active = self._knee if self._channel == "knee" else self._stride
-            holding = (active.amplitude() >= self.amp_stop
-                       and active.cadence_hz(self.cadence_max_hz) > 0.0)
+            # STOPPING is judged on RECENT amplitude only. The cadence estimate
+            # is deliberately not part of this test: it is derived from crossings
+            # kept for ``cross_window_s`` (3.0 s), so it stays positive for three
+            # seconds after the human plants their feet, and an AND with it could
+            # only ever delay the stop, never hasten it.
+            holding = active.amplitude_in(self.stop_window_s) >= self.amp_stop
             if not holding:
                 # The other channel may still be carrying it (a walk that turns
-                # into a march on the spot, say) -- do not stop if it is.
+                # into a march on the spot, say) -- do not stop if it is. But it
+                # must be carrying it NOW: ``qualifies`` is the START gate, and
+                # its crossing count spans 3.0 s, so using it here let a channel
+                # that had stopped moving a full window ago veto the stop. That
+                # handover is what kept "march" alive for 61.4 s of a 238 s
+                # session in which the human was walking for only half of it.
                 other = self._stride if active is self._knee else self._knee
-                if qualifies(other):
+                if qualifies(other) and other.amplitude_in(self.stop_window_s) >= self.amp_stop:
                     self._channel = "stride" if other is self._stride else "knee"
                 else:
                     self._state = "idle"

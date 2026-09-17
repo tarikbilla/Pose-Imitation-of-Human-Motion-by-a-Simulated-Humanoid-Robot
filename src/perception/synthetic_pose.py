@@ -43,6 +43,8 @@ UPPER_ARM = 300.0
 FOREARM = 260.0
 THIGH = 430.0
 SHANK = 420.0
+HAND = 190.0           # wrist -> middle fingertip (adult 50th percentile)
+THUMB = 110.0          # wrist -> thumb tip, out to the thumb side of the palm
 NECK_TO_NOSE = 240.0
 HEAD_HALF_WIDTH = 75.0  # ear to ear / 2
 EYE_HALF_WIDTH = 32.0
@@ -99,6 +101,15 @@ class BodyState:
     body_yaw: float = 0.0        # subject rotating on the spot
     head_yaw: float = 0.0
     head_pitch: float = 0.0      # + = looking down
+    # Hand. ``*_wrist_roll`` rotates the palm about the forearm's own long axis
+    # (0 = thumb up when the arm hangs), which is the ONLY thing that moves
+    # NAO's WristYaw -- shoulder, elbow and wrist positions are all invariant
+    # under it, which is why the joint went untracked for the project's whole
+    # life. ``*_grip`` closes the fingers: 0 = open hand, 1 = fist.
+    left_wrist_roll: float = 0.0
+    right_wrist_roll: float = 0.0
+    left_grip: float = 0.0
+    right_grip: float = 0.0
 
 
 MAX_CROUCH_DROP = 320.0   # how far the hips sink at crouch = 1
@@ -203,8 +214,80 @@ def _arm_chain(
     return elbow, wrist
 
 
+def _hand_points(shoulder, elbow, wrist, side_sign: float, roll: float, grip: float):
+    """Finger and thumb markers for one hand.
+
+    Built as a frame carried along the forearm, because that is what makes the
+    result mean anything: the FINGER marker continues the forearm's own
+    direction (shortening as the fingers curl into a fist), and the THUMB
+    marker sits off to one side of it, rotated about the forearm axis by
+    ``roll``. So the thumb's position is the only carrier of the palm's
+    orientation -- exactly the relationship ``nao_retarget`` has to invert to
+    recover WristYaw, and a synthetic hand that got it wrong would let a broken
+    solve pass.
+    """
+    fx, fy, fz = _limb_direction_between(wrist, elbow)
+    ax, ay, az = _thumb_reference(_limb_direction_between(elbow, shoulder),
+                                 (fx, fy, fz))
+    bx, by, bz = fy * az - fz * ay, fz * ax - fx * az, fx * ay - fy * ax
+    cos_r, sin_r = math.cos(roll), math.sin(roll)
+    # Thumb side flips with the hand: the thumbs of two relaxed arms point at
+    # each other, not the same way.
+    tx = side_sign * (ax * cos_r + bx * sin_r)
+    ty = side_sign * (ay * cos_r + by * sin_r)
+    tz = side_sign * (az * cos_r + bz * sin_r)
+    reach = HAND * (1.0 - 0.6 * max(0.0, min(1.0, grip)))
+    finger = (wrist[0] + reach * fx, wrist[1] + reach * fy, wrist[2] + reach * fz)
+    # A closing hand brings the thumb across the palm toward the fingers, so the
+    # thumb-to-finger distance is what reads as grip.
+    lean = 0.5 * max(0.0, min(1.0, grip))
+    thumb = (
+        wrist[0] + THUMB * (tx * (1.0 - lean) + fx * lean),
+        wrist[1] + THUMB * (ty * (1.0 - lean) + fy * lean),
+        wrist[2] + THUMB * (tz * (1.0 - lean) + fz * lean),
+    )
+    return finger, thumb
+
+
+def _limb_direction_between(tip, root) -> tuple[float, float, float]:
+    dx, dy, dz = tip[0] - root[0], tip[1] - root[1], tip[2] - root[2]
+    n = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+    return dx / n, dy / n, dz / n
+
+
+def _thumb_reference(upper, fore) -> tuple[float, float, float]:
+    """Unit vector perpendicular to the forearm that ``wrist_roll`` measures from.
+
+    Referenced to the UPPER ARM -- which is how a real forearm's twist is
+    anatomically defined, about the elbow -- rather than to a world axis. That
+    choice is what makes it continuous through every pose a scripted motion
+    actually holds. Its only pole is the forearm lying along the upper arm, i.e.
+    a perfectly straight elbow, and that pole is harmless because it is the SAME
+    configuration where ``nao_retarget`` declines to solve the roll joints at all
+    (``ELBOW_YAW_MIN_BEND``): past it the retargeter emits nothing, so nothing
+    downstream can see the fixture's reference swing.
+
+    Two earlier versions both picked a world axis and both teleported the thumb
+    180 degrees mid-motion: "whichever axis the forearm is least aligned with"
+    flipped when a bending elbow crossed |y| = 0.9, and a fixed forward axis
+    flipped at elbow 55 deg of an ordinary forward reach, where the forearm
+    points straight at the camera. Measured: a 156 mm jump between adjacent
+    one-degree steps, with the wrist held still. A body that teleports is
+    exactly what this module's docstring promises not to build.
+    """
+    dot = sum(upper[i] * fore[i] for i in range(3))
+    perp = [upper[i] - dot * fore[i] for i in range(3)]
+    n = math.sqrt(sum(c * c for c in perp))
+    if n < 1e-6:
+        # Straight elbow: no angle to measure from. Any perpendicular keeps the
+        # geometry valid, and nothing reads it here.
+        perp = [-fore[1], fore[0], 0.0]
+        n = math.sqrt(sum(c * c for c in perp)) or 1.0
+    return tuple(c / n for c in perp)
+
+
 def build_pose(state: BodyState, timestamp_s: float, frame_index: int) -> PoseFrame:
-    """One ``PoseFrame`` of coco_19 landmarks for the given body state."""
+    """One ``PoseFrame`` of body + hand landmarks for the given body state."""
     z0 = STANDING_DISTANCE
     hip_y = state.crouch * MAX_CROUCH_DROP
     shoulder_y = hip_y - TORSO
@@ -267,6 +350,22 @@ def build_pose(state: BodyState, timestamp_s: float, frame_index: int) -> PoseFr
         "left_knee": left_knee, "right_knee": right_knee,
         "left_ankle": left_ankle, "right_ankle": right_ankle,
     }
+
+    # Hands. left_hand_root is the hand frame's own origin; on a real subject it
+    # is MeTRAbs' H36M wrist marker, which sits a little off the cmu_panoptic
+    # wrist the arm chain uses. Here they coincide, which is the honest choice
+    # for a synthetic body: the solve only ever reads differences within the
+    # hand triad, so an invented offset would test nothing but itself.
+    for side, shoulder, elbow, wrist, sign, roll, grip in (
+        ("left", left_shoulder, left_elbow, left_wrist, LEFT_SIDE_SIGN,
+         state.left_wrist_roll, state.left_grip),
+        ("right", right_shoulder, right_elbow, right_wrist, -LEFT_SIDE_SIGN,
+         state.right_wrist_roll, state.right_grip),
+    ):
+        finger, thumb = _hand_points(shoulder, elbow, wrist, sign, roll, grip)
+        points[f"{side}_hand_root"] = wrist
+        points[f"{side}_finger"] = finger
+        points[f"{side}_thumb"] = thumb
 
     # Whole-body yaw last, about the vertical axis through the subject's centre,
     # so turning does not also translate them across the frame.

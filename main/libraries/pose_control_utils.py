@@ -106,6 +106,20 @@ def get_default_motor_configs() -> dict[str, MotorConfig]:
         MotorConfig("RElbowRoll",     _deg(2.0),    _deg(88.5),  7.19, _deg(30)),
         MotorConfig("RWristYaw",      _deg(-104.5), _deg(104.5), 24.6, 0.0),
 
+        # Fingers. Webots' NAO exposes eight phalanx motors per hand and no
+        # single hand motor, so a grip is commanded by writing all eight. The
+        # range below is the documented 0..0.96 rad, but it is NOT relied on:
+        # _setup_devices asks each motor for its own getMinPosition() /
+        # getMaxPosition() and adopts what it reports, because Nao.proto is an
+        # EXTERNPROTO fetched at world-load time and is not on disk to check.
+        # A model without fingers simply reports them missing and the grip
+        # channel goes quiet.
+        *[
+            MotorConfig(f"{side}Phalanx{i}", 0.0, 0.96, 8.26, 0.96)
+            for side in ("L", "R")
+            for i in range(1, 9)
+        ],
+
         # Left leg
         MotorConfig("LHipYawPitch",   _deg(-65.6),  _deg(42.4),  4.16, 0.0),
         MotorConfig("LHipRoll",       _deg(-21.7),  _deg(45.3),  4.16, 0.0),
@@ -216,6 +230,183 @@ class ExponentialSmoother:
         value = target if prev is None else prev + (target - prev) * a
         self._state[joint_name] = value
         return value
+
+
+# Arm joints tracked by :class:`ArmTracker`: everything from the shoulder out.
+# Explicitly NOT the head (its solve has its own per-subject calibration and its
+# own neutral) and NOT the legs (they carry the robot's weight, and a predicted
+# overshoot there is a fall, not a wobble).
+TRACKED_ARM_JOINTS = (
+    "LShoulderPitch", "RShoulderPitch",
+    "LShoulderRoll", "RShoulderRoll",
+    "LElbowYaw", "RElbowYaw",
+    "LElbowRoll", "RElbowRoll",
+    "LWristYaw", "RWristYaw",
+)
+
+# The two GRIP channels. These are not joints and not radians: each is a hand
+# closure in [0, 1] (0 = open, 1 = fist) which the driver fans out across that
+# hand's phalanx motors. Webots' NAO has no single "LHand" motor -- it exposes
+# eight LPhalanx motors and eight RPhalanx ones -- so one commanded value per
+# hand is the only sane interface for something the retargeter measures as a
+# single thumb-to-finger distance.
+HAND_GRIP_JOINTS = ("LHand", "RHand")
+# Which end of a phalanx motor's travel is an OPEN hand. Webots' NAO documents
+# 0.96 rad as open and 0 as closed, but Nao.proto is an EXTERNPROTO fetched at
+# world-load time and cannot be read from disk here to confirm it. If the robot
+# grips when the human opens their hand, flip this one flag -- the actual
+# numbers come from the motor itself (see _adopt_reported_limits), so nothing
+# else needs touching.
+HAND_OPEN_AT_MAX = True
+PHALANX_JOINTS: dict[str, tuple[str, ...]] = {
+    "LHand": tuple(f"LPhalanx{i}" for i in range(1, 9)),
+    "RHand": tuple(f"RPhalanx{i}" for i in range(1, 9)),
+}
+
+
+class ArmTracker:
+    """Frame-rate-independent, velocity-predicted tracking for the arm joints.
+
+    Replaces the plain per-frame EMA on the arms, which cost more delay than
+    anything else in the chain. Two separate faults, both measured on the
+    2026-09-16 session (run_20260916_110404 against
+    webots_joint_trajectory_1789548982, 428 s overlap, 19441 non-stale ticks;
+    lag by cross-correlation of the human's own elbow-bend signal against the
+    logged command):
+
+    **1. The EMA's delay was set by the camera's frame rate, not by a number
+    anyone chose.** ``_apply_targets`` runs once per UDP frame, so ``alpha =
+    0.4`` at the measured 11.8 Hz was ``(1 - a) / a / rate = 127 ms`` of the
+    160-180 ms measured between the (already-smoothed) pose log and the
+    commanded angle. Had the pipeline dropped to 6 FPS that would have silently
+    doubled to 250 ms. So the smoothing is specified as a TIME CONSTANT here and
+    the per-step factor is derived from the actual elapsed time,
+    ``a = 1 - exp(-dt / tau)``, which holds the response fixed whatever the
+    frame rate does.
+
+    **2. Nothing moved between camera frames.** The simulation steps at 50 Hz
+    and the arm target only changed at 11.8 Hz, so the arm advanced in ~12
+    visible increments a second with a hold in between. :meth:`advance` is
+    called every tick and keeps integrating the last known target VELOCITY, so
+    the motion stays continuous at simulation rate instead of stepping.
+
+    The same velocity also buys back the delay that is left. The command aims at
+    where the joint is predicted to be ``lead_s`` from the last observation
+    rather than where it was measured to be, so the residual pipeline delay is
+    cancelled instead of merely reduced. That is only safe because it is bounded
+    three ways:
+
+    * the extrapolation term is clamped to ``max_lead_rad``, so a single noisy
+      landmark cannot fling the arm across its range;
+    * the extrapolation runs at full confidence only for as long as the next
+      camera frame is still due -- the inter-frame period is measured, not
+      assumed -- and then fades out over ``max_extrapolate_s``, so a dropped
+      frame coasts briefly and settles onto the last pose the human was
+      actually seen in rather than one that was only predicted;
+    * once it has faded there is nothing left to integrate, so a human who
+      leaves the frame leaves a still arm, not a drifting one.
+
+    Prediction is deliberately built on the RETARGETED joint target rather than
+    on the landmarks: joint space is where the limits live, so a clamp here is
+    a clamp in the units the motor actually understands.
+    """
+
+    def __init__(
+        self,
+        *,
+        tau_s: float = 0.07,
+        lead_s: float = 0.20,
+        max_lead_rad: float = 0.35,
+        max_extrapolate_s: float = 0.20,
+        vel_tau_s: float = 0.10,
+    ) -> None:
+        self.tau_s = max(0.0, tau_s)
+        self.lead_s = max(0.0, lead_s)
+        self.max_lead_rad = max(0.0, max_lead_rad)
+        self.max_extrapolate_s = max(0.0, max_extrapolate_s)
+        self.vel_tau_s = max(1e-3, vel_tau_s)
+        self._target: dict[str, float] = {}
+        self._vel: dict[str, float] = {}
+        self._obs_t: dict[str, float] = {}
+        self._pos: dict[str, float] = {}
+        self._frame_dt: dict[str, float] = {}
+
+    def reset(self, name: str, value: float) -> None:
+        """Seed every state for ``name`` at ``value``, stationary."""
+        self._target[name] = value
+        self._vel[name] = 0.0
+        self._pos[name] = value
+        self._obs_t.pop(name, None)
+        self._frame_dt.pop(name, None)
+
+    def forget(self, name: str) -> None:
+        """Drop the velocity estimate, keeping the position. Used when the
+        target is being commanded by something other than the imitation (a
+        stand-down ramp), where the old velocity describes a motion that is no
+        longer happening."""
+        self._vel[name] = 0.0
+        self._obs_t.pop(name, None)
+
+    def observe(self, name: str, target: float, now_s: float | None) -> None:
+        """Record one camera frame's retargeted value for ``name``."""
+        prev = self._target.get(name)
+        prev_t = self._obs_t.get(name)
+        self._target[name] = target
+        if now_s is None:
+            self._obs_t.pop(name, None)
+            return
+        self._obs_t[name] = now_s
+        if prev is None or prev_t is None:
+            self._vel.setdefault(name, 0.0)
+            return
+        dt = now_s - prev_t
+        # A zero or negative dt means two frames landed on one simulation step
+        # (or the clock went backwards across a reset): there is no velocity to
+        # read from it, and dividing by it would manufacture an enormous one.
+        if dt <= 1e-6:
+            return
+        raw = (target - prev) / dt
+        blend = 1.0 - math.exp(-dt / self.vel_tau_s)
+        self._vel[name] = self._vel.get(name, 0.0) + (raw - self._vel.get(name, 0.0)) * blend
+        # How long until the next frame is due. Measured rather than assumed:
+        # the camera rate is adaptive (AdaptiveFPSController), so a fixed guess
+        # would either cut the extrapolation short at low frame rates or keep
+        # extrapolating through a real dropout at high ones.
+        known = self._frame_dt.get(name)
+        self._frame_dt[name] = dt if known is None else known + (dt - known) * 0.2
+
+    def advance(self, name: str, now_s: float | None, dt_s: float) -> float | None:
+        """Command for ``name`` this step, or ``None`` if it has never been seen."""
+        target = self._target.get(name)
+        if target is None:
+            return None
+        goal = target
+        obs_t = self._obs_t.get(name)
+        if now_s is not None and obs_t is not None:
+            age = max(0.0, now_s - obs_t)
+            # One expected frame period of full-confidence coasting. Inside it
+            # the extrapolation is not a guess about a missing frame at all --
+            # it is the continuation between two frames that are both going to
+            # arrive, which is what keeps the arm moving at simulation rate.
+            # Fading during THAT window would just re-introduce the lag the
+            # lead exists to remove (measured: 22 mrad of residual error on a
+            # 1 rad/s ramp, a fifth of the delay handed straight back).
+            hold = self._frame_dt.get(name, 0.0)
+            if age <= hold or self.max_extrapolate_s <= 0.0:
+                fade = 1.0
+            else:
+                fade = _clamp(1.0 - (age - hold) / self.max_extrapolate_s, 0.0, 1.0)
+            reach = min(age, hold + self.max_extrapolate_s)
+            step = self._vel.get(name, 0.0) * (self.lead_s + reach) * fade
+            goal = target + _clamp(step, -self.max_lead_rad, self.max_lead_rad)
+        pos = self._pos.get(name)
+        if pos is None:
+            self._pos[name] = goal
+            return goal
+        a = 1.0 if self.tau_s <= 0.0 or dt_s <= 0.0 else 1.0 - math.exp(-dt_s / self.tau_s)
+        pos += (goal - pos) * _clamp(a, 0.0, 1.0)
+        self._pos[name] = pos
+        return pos
 
 
 class MotorHealthMonitor:
@@ -363,6 +554,9 @@ class NaoPoseDriver:
         walk_tier: str = "march",
         gait_smoothing_alpha: float = 0.7,
         gait_leg_velocity_factor: float = 0.85,
+        arm_tau_s: float = 0.07,
+        arm_lead_s: float = 0.16,
+        arm_velocity_factor: float = 1.0,
         gait_params: object | None = None,
         lower_body_params: object | None = None,
         logger: Callable[[str], None] | None = None,
@@ -389,6 +583,15 @@ class NaoPoseDriver:
         # the targets. See ExponentialSmoother.
         self.smoother = ExponentialSmoother(smoothing_alpha)
         self.leg_alpha = max(0.0, min(1.0, gait_smoothing_alpha))
+        # The arms do not go through `smoother`: they are tracked in continuous
+        # time and predicted forward, because the plain per-frame EMA was the
+        # single largest delay in the imitation chain. See ArmTracker.
+        self.arm_tracker = ArmTracker(tau_s=arm_tau_s, lead_s=arm_lead_s)
+        # >1 is meaningful here and 1.0 is not the ceiling: it multiplies
+        # `velocity_scale` (0.5 by default), and the product is what gets capped
+        # at the hardware maximum.
+        self.arm_velocity_factor = max(0.05, min(4.0, arm_velocity_factor))
+        self._last_arm_tick: float | None = None
         self.health = MotorHealthMonitor()
 
         self.motors: dict[str, object] = {}
@@ -410,6 +613,10 @@ class NaoPoseDriver:
         self.stats = DriverStats()
         self._last_command_time: float | None = None
         self._last_balance_time: float | None = None
+        # Set when a clip hands the body back; starts the leg-target rate
+        # cap on the next applied frame (see _handover_leg_step).
+        self._handover_pending: bool = False
+        self._handover_since: float | None = None
         self._last_leg_pose_time: float | None = None
 
         # Model-based CoM balance feedback (Option 2: FK + known link masses).
@@ -508,6 +715,8 @@ class NaoPoseDriver:
                 continue
             self.motors[name] = motor
             found += 1
+            if "Phalanx" in name:
+                self._adopt_reported_limits(name, motor)
             sensor = self.robot.getDevice(name + "S")
             if sensor is not None:
                 try:
@@ -519,6 +728,34 @@ class NaoPoseDriver:
         self.log(f"Motors found: {found}/{len(self.configs)}; sensors: {len(self.sensors)}")
         if missing:
             self.log(f"Motors not present on this model: {', '.join(missing)}")
+        grips = [g for g in HAND_GRIP_JOINTS
+                 if any(p in self.motors for p in PHALANX_JOINTS[g])]
+        if grips:
+            sample = self.configs[PHALANX_JOINTS[grips[0]][0]]
+            self.log(f"Grip available on {', '.join(grips)} "
+                     f"(phalanx range {sample.min_angle:.3f}..{sample.max_angle:.3f} rad)")
+        else:
+            self.log("No phalanx motors on this model: grip will not be driven.")
+
+    def _adopt_reported_limits(self, name: str, motor: object) -> None:
+        """Replace a finger MotorConfig's range with what the motor reports.
+
+        The hand is the one place this module cannot check its numbers against a
+        file: Nao.proto is fetched over the network when the world loads. Rather
+        than trust a documented 0..0.96 and drive the fingers to the wrong end of
+        their travel, ask the device. Webots motors carry their own limits, and a
+        PROTO that revises them stays correct here for free.
+        """
+        try:
+            lo = float(motor.getMinPosition())
+            hi = float(motor.getMaxPosition())
+        except Exception:  # noqa: BLE001 - not every build exposes these
+            return
+        if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
+            return
+        old = self.configs[name]
+        self.configs[name] = MotorConfig(name, lo, hi, old.max_velocity,
+                                         _clamp(old.rest_angle, lo, hi))
 
     def _set_motor(self, name: str, angle: float, velocity: float) -> None:
         motor = self.motors.get(name)
@@ -543,6 +780,30 @@ class NaoPoseDriver:
     def _smooth(self, name: str, target: float) -> float:
         return self.smoother.smooth(name, target, self._alpha_for(name))
 
+    def _handover_leg_step(self, now_s: float | None) -> float | None:
+        """Max leg-target change this tick while easing out of a clip, else None.
+
+        Returns ``None`` once the blend window has expired, which restores full
+        1:1 leg tracking -- this is a guard on the transition only, not a
+        permanent speed limit on leg imitation.
+        """
+        if self._handover_since is None:
+            if self._handover_pending and now_s is not None:
+                self._handover_since = now_s
+                self._handover_pending = False
+            else:
+                return None
+        if now_s is None:
+            return self.LEG_POSE_RATE * 0.02
+        elapsed = now_s - self._handover_since
+        if elapsed < 0.0 or elapsed >= self.HANDOVER_BLEND_S:
+            self._handover_since = None
+            return None
+        dt = 0.02
+        if self._last_command_time is not None:
+            dt = max(0.0, min(0.1, now_s - self._last_command_time))
+        return self.LEG_POSE_RATE * dt
+
     def _velocity_for(self, name: str) -> float:
         cfg = self.configs.get(name)
         ceiling = cfg.max_velocity if cfg else 4.0
@@ -551,6 +812,14 @@ class NaoPoseDriver:
         # in rather than jolting the centre of mass off the feet (NFR-4).
         if name in ALL_LEG_JOINTS:
             scale *= self.leg_velocity_factor
+        elif name in TRACKED_ARM_JOINTS:
+            # The arms hold nothing up, so the reason the legs are throttled
+            # (NFR-4: a jolt moves the centre of mass off the feet) does not
+            # apply to them. Measured on the 2026-09-16 session the arm command
+            # demanded up to 3.2 rad/s against a 3.6 rad/s ceiling, so the cap
+            # was clipping the fastest gestures -- exactly the ones that read as
+            # "the robot did not follow".
+            scale = min(1.0, scale * self.arm_velocity_factor)
         return ceiling * scale
 
     # -- posture ------------------------------------------------------------
@@ -559,6 +828,8 @@ class NaoPoseDriver:
         posture = standing_posture()
         for name, angle in posture.items():
             self.smoother.reset(name, angle)
+            if name in TRACKED_ARM_JOINTS:
+                self.arm_tracker.reset(name, angle)
             self._set_motor(name, angle, self._velocity_for(name) * 0.6)
         self.log("Applied standing posture")
 
@@ -566,22 +837,101 @@ class NaoPoseDriver:
     def _apply_targets(self, targets: dict[str, float], now_s: float | None) -> int:
         """Smooth, command and bookkeep a set of NAO joint targets."""
         applied = 0
+        # Rate ceiling on the LEG targets for a short window after a clip hands
+        # the body back. Getting INTO a clip has always been ramped
+        # (approach_leg_pose); coming out of one was not, and the clip leaves the
+        # legs wherever its last keyframe put them while the human's pose asks
+        # for something up to 0.5 rad away. Measured on the 2026-09-08 session:
+        # 13 of 13 clip->pose handovers drove support_margin_x to between -0.046
+        # and -0.091 m -- the centre of mass off the front of the feet -- and all
+        # three falls began within 0.13-1.32 s of one. The cap is LEG_POSE_RATE,
+        # the same rate the entry ramp already proves is safe.
+        leg_step = self._handover_leg_step(now_s)
         for name, target in targets.items():
-            if name not in self.motors or self._is_suspended(name):
+            if name not in self.motors and name not in HAND_GRIP_JOINTS:
+                continue
+            if self._is_suspended(name):
                 # A suspended joint is the clip's; the rest are still ours. The
                 # frame time is recorded either way so staleness detection keeps
                 # working across a clip.
                 continue
+            if leg_step is not None and name in ALL_LEG_JOINTS:
+                prev = self.base_targets.get(
+                    name, self.measured.get(name, self.commanded.get(name, target)))
+                target = prev + _clamp(target - prev, -leg_step, leg_step)
             self.base_targets[name] = target
-            smoothed = self._smooth(name, target)
-            self._set_motor(name, smoothed, self._velocity_for(name))
+            if name in HAND_GRIP_JOINTS:
+                # A closure in [0, 1], not an angle: observed here, fanned out
+                # across the phalanx motors by tick_arms.
+                self.arm_tracker.observe(name, _clamp(target, 0.0, 1.0), now_s)
+            elif name in TRACKED_ARM_JOINTS:
+                # Record the observation; `tick_arms` turns it into a command
+                # every simulation step, not just on the frames that carry one.
+                self.arm_tracker.observe(name, target, now_s)
+            else:
+                smoothed = self._smooth(name, target)
+                self._set_motor(name, smoothed, self._velocity_for(name))
             applied += 1
 
+        self.tick_arms(now_s)
         if now_s is not None:
             self._last_command_time = now_s
         self.stats.frames_applied += 1
         self.stats.joints_last_applied = applied
         self.stats.stale = False
+        return applied
+
+    def tick_arms(self, now_s: float | None) -> int:
+        """Re-command every tracked arm joint for this simulation step.
+
+        Called once per control step (and once more whenever a camera frame
+        lands, so a fresh observation reaches the motors without waiting for the
+        next tick). The camera runs at ~12 Hz and the simulation at 50, so
+        without this the arm held still for four steps out of five and then
+        jumped -- visible as stepping rather than motion, and the reason the
+        arms looked laggy even where the average delay was small.
+
+        Returns the number of joints commanded.
+        """
+        dt = 0.001 * self.timestep
+        if now_s is not None and self._last_arm_tick is not None:
+            # Clamp: a simulation reset or a long stall must not hand the
+            # smoother a dt so large that it snaps the arm to the goal.
+            dt = _clamp(now_s - self._last_arm_tick, 0.0, 0.2)
+        if now_s is not None:
+            self._last_arm_tick = now_s
+        applied = 0
+        for name in TRACKED_ARM_JOINTS:
+            if name not in self.motors or self._is_suspended(name):
+                continue
+            value = self.arm_tracker.advance(name, now_s, dt)
+            if value is None:
+                continue
+            self._set_motor(name, value, self._velocity_for(name))
+            applied += 1
+        applied += self._tick_grip(now_s, dt)
+        return applied
+
+    def _tick_grip(self, now_s: float | None, dt: float) -> int:
+        """Fan each hand's closure out across its eight phalanx motors."""
+        applied = 0
+        for grip_name in HAND_GRIP_JOINTS:
+            closure = self.arm_tracker.advance(grip_name, now_s, dt)
+            if closure is None:
+                continue
+            closure = _clamp(closure, 0.0, 1.0)
+            for phalanx in PHALANX_JOINTS[grip_name]:
+                if phalanx not in self.motors or self._is_suspended(phalanx):
+                    continue
+                cfg = self.configs[phalanx]
+                # Interpolate between the motor's OWN reported ends, so which
+                # end is "open" is a property of the model rather than a number
+                # written here. HAND_OPEN_AT_MAX names the assumption.
+                lo, hi = (cfg.max_angle, cfg.min_angle) if HAND_OPEN_AT_MAX \
+                    else (cfg.min_angle, cfg.max_angle)
+                self._set_motor(phalanx, lo + (hi - lo) * closure,
+                                self._velocity_for(phalanx))
+                applied += 1
         return applied
 
     def _balance_feedback(self, state: dict[str, float], torso_rp: tuple,
@@ -723,6 +1073,10 @@ class NaoPoseDriver:
     # stance in 0.56 s.
     LEG_POSE_RATE = 1.5      # rad/s
     LEG_POSE_TOL = 0.08      # rad; per-joint arrival tolerance on the MEASURED angle
+    # How long the leg targets stay rate-capped after a clip hands the body
+    # back. Long enough to walk 0.5 rad of gap in at LEG_POSE_RATE (0.33 s)
+    # with margin; short enough that ordinary leg imitation is untouched.
+    HANDOVER_BLEND_S = 0.6
 
     def approach_leg_pose(self, pose: dict[str, float], now_s: float | None = None,
                           rate: float | None = None,
@@ -831,6 +1185,10 @@ class NaoPoseDriver:
         "LElbowRoll", "RElbowRoll",
         "LWristYaw", "RWristYaw",
         "HeadYaw", "HeadPitch",
+        # The grip channels, so a departed human does not leave the robot
+        # holding a fist. Named here rather than the sixteen phalanx motors:
+        # tick_arms fans one closure out to all of them.
+        *HAND_GRIP_JOINTS,
     )
 
     def upper_body_stand_down(self) -> int:
@@ -851,15 +1209,32 @@ class NaoPoseDriver:
             return 0
         applied = 0
         for name in self.UPPER_BODY_JOINTS:
+            if name in HAND_GRIP_JOINTS:
+                # An open hand is the neutral, and there is no MotorConfig to
+                # read it from: the grip is a closure in [0, 1], not an angle.
+                self.base_targets[name] = 0.0
+                self.arm_tracker.observe(name, 0.0, None)
+                self.arm_tracker.forget(name)
+                applied += 1
+                continue
             if name not in self.motors:
                 continue
             cfg = self.configs.get(name)
             if cfg is None:
                 continue
             self.base_targets[name] = cfg.rest_angle
-            smoothed = self._smooth(name, cfg.rest_angle)
-            self._set_motor(name, smoothed, self._velocity_for(name))
+            if name in TRACKED_ARM_JOINTS:
+                # Target the neutral and drop the velocity estimate: the old one
+                # describes a gesture that is no longer being made, and
+                # extrapolating it would send the arm PAST the rest pose on the
+                # way to standing down.
+                self.arm_tracker.observe(name, cfg.rest_angle, None)
+                self.arm_tracker.forget(name)
+            else:
+                smoothed = self._smooth(name, cfg.rest_angle)
+                self._set_motor(name, smoothed, self._velocity_for(name))
             applied += 1
+        self.tick_arms(None)
         return applied
 
     @property
@@ -923,6 +1298,10 @@ class NaoPoseDriver:
         reclaimed = sorted(self._suspended)
         self._suspended = set()
         self.reseed_from_measured()
+        # Ease the legs from where the clip left them to where the human
+        # is, instead of commanding the whole gap on the next tick.
+        self._handover_pending = True
+        self._handover_since = None
         # Tell the lower body where the clip left the legs, so its own crouch
         # ramps DOWN from there instead of snapping. A walk clip ends in the same
         # 0.51 rad squat it started in, and the lower body's standing depth is
@@ -1111,6 +1490,14 @@ class NaoPoseDriver:
             "LShoulderPitch", "RShoulderPitch",
             "LShoulderRoll", "RShoulderRoll",
             "LElbowRoll", "RElbowRoll",
+            # The roll joints and one representative finger per hand. Logged
+            # because "is it tracking?" for these cannot be answered by looking
+            # at the robot: a wrist that twists the wrong way and one that does
+            # not twist at all are hard to tell apart in a video, and all
+            # sixteen phalanx columns would say the same thing as the one.
+            "LElbowYaw", "RElbowYaw",
+            "LWristYaw", "RWristYaw",
+            "LPhalanx1", "RPhalanx1",
         ]
         if self.drive_head:
             joints += ["HeadYaw", "HeadPitch"]

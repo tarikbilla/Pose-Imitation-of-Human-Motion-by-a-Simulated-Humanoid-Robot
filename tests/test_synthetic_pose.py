@@ -196,3 +196,164 @@ def test_the_side_convention_survives_a_mirrored_capture() -> None:
         mirrored[other] = (-kp.x, kp.y, kp.z)
     assert (mirrored["left_shoulder"][0] - mirrored["right_shoulder"][0]) == pytest.approx(
         kps["left_shoulder"].x - kps["right_shoulder"].x, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Hands. These cross-check two INDEPENDENT constructions: this generator builds
+# the hand frame from cross products against a world axis, while nao_retarget
+# inverts NAO's own Ry.Rz.Rx.Rz.Rx arm chain. Neither knows about the other, so
+# agreement between them is evidence about the convention and not just about the
+# algebra -- which is what the round-trip test in test_nao_retarget.py, being
+# the same maths forwards and backwards, cannot give.
+# ---------------------------------------------------------------------------
+# The elbows are BENT on purpose. With a straight arm the forearm lies on the
+# ElbowYaw axis, so that joint is unobservable and WristYaw -- which is solved
+# in the forearm frame -- goes with it. That is the documented behaviour and it
+# is asserted separately in test_nao_retarget.py; here it would just mean the
+# wrist tests silently measured nothing.
+HAND_STATES = [
+    BodyState(left_wrist_roll=r, right_wrist_roll=r,
+              left_elbow=math.radians(70), right_elbow=math.radians(70),
+              left_arm_fwd=math.radians(35), right_arm_fwd=math.radians(35))
+    for r in (0.0, 0.3, 0.6, 0.9, 1.2)
+]
+
+
+def _retarget(state):
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "main", "libraries"))
+    from nao_retarget import retarget_upper_body
+
+    kps = build_pose(state, 0.0, 0).keypoints
+    return retarget_upper_body(
+        {n: [kp.x, kp.y, kp.z, kp.visibility] for n, kp in kps.items()}
+    )
+
+
+def test_the_hand_keeps_its_size_however_the_wrist_turns() -> None:
+    """Turning a wrist must not stretch the hand. The generator builds the
+    thumb from a rotated frame, and a frame that was not orthonormal would show
+    up here as a hand that grows as it rotates."""
+    spans = []
+    for state in HAND_STATES:
+        kps = build_pose(state, 0.0, 0).keypoints
+        spans.append(_dist(kps["left_hand_root"], kps["left_thumb"]))
+    assert max(spans) - min(spans) < 1e-6, spans
+
+
+def test_turning_the_wrist_moves_naos_wrist_and_nothing_else() -> None:
+    """The defining property of a roll joint, and the reason it needed hand
+    landmarks: rotating the palm about the forearm leaves every other joint --
+    shoulder, elbow, the positions of every body landmark -- exactly where it
+    was. If ShoulderPitch or ElbowRoll move here, the solve is reading the twist
+    out of something that does not carry it."""
+    baseline = _retarget(HAND_STATES[0])
+    for state in HAND_STATES[1:]:
+        t = _retarget(state)
+        for joint in ("LShoulderPitch", "LShoulderRoll", "LElbowRoll",
+                      "RShoulderPitch", "RShoulderRoll", "RElbowRoll"):
+            assert t[joint] == pytest.approx(baseline[joint], abs=1e-6), joint
+
+
+def _wrist_sweep(elbow_deg):
+    states = [
+        BodyState(left_wrist_roll=r, left_elbow=math.radians(elbow_deg),
+                  left_arm_fwd=math.radians(35))
+        for r in (0.0, 0.3, 0.6, 0.9, 1.2)
+    ]
+    angles = [_retarget(s).get("LWristYaw") for s in states]
+    assert all(a is not None for a in angles), angles
+    limit = math.radians(104.5)
+    assert all(abs(a) < limit - 1e-3 for a in angles), (
+        f"a clipped joint proves nothing about tracking: {angles}")
+    return [a - s.left_wrist_roll for a, s in zip(angles, states, strict=True)]
+
+
+def test_the_wrist_angle_tracks_the_palm_exactly() -> None:
+    """A palm turning by X turns NAO's wrist by X -- and from the same zero.
+
+    The offset being ~0 rather than merely CONSTANT is the interesting part, and
+    it is not something either side was fitted to: this generator defines
+    ``wrist_roll = 0`` as "thumb toward the upper arm", while nao_retarget
+    inverts NAO's Ry.Rz.Rx.Rz.Rx chain and never sees the upper arm at all. They
+    agree because both describe the same geometry.
+
+    It is NOT a check on the real robot's palm. Which way NAO's palm faces at
+    ``WristYaw = 0`` is set by Nao.proto, fetched over the network at world-load
+    time and not readable here; ``nao_retarget.HAND_YAW_SIGN`` is the single
+    constant that corrects it if the wrists come out half a turn round.
+
+    Run below the elbow's compression knee so the arm the solve inverts is the
+    arm the human is actually holding -- see the next test for what happens
+    above it, which is a property of the compression and not of this solve.
+    """
+    offsets = _wrist_sweep(55)
+    assert max(offsets) - min(offsets) < 1e-6, offsets
+    assert abs(offsets[0]) < 1e-6, offsets
+
+
+def test_a_compressed_elbow_costs_the_wrist_a_little_and_only_a_little() -> None:
+    """Above ELBOW_LINEAR_RAD the robot's forearm is deliberately NOT where the
+    human's is -- NAO's elbow stops 60 deg short, so the bend is compressed. The
+    wrist is then solved against the robot's forearm rather than the human's,
+    which is the right choice (it puts the palm where the human's is RELATIVE TO
+    THE ARM, which is what an onlooker reads) but means the angle cannot also
+    match in absolute terms. Measured: 0 mrad at the knee, 3.5 at 70 deg of
+    bend, 32 at 90. Bounded and far below what MeTRAbs' own noise contributes --
+    pinned here so a future change to the compression cannot quietly turn a
+    third of a degree into thirty.
+    """
+    for bend, ceiling in ((60, 1e-6), (70, 0.006), (90, 0.05)):
+        offsets = _wrist_sweep(bend)
+        drift = max(offsets) - min(offsets)
+        assert drift < ceiling, f"{bend} deg of bend drifted {drift*1000:.1f} mrad"
+
+
+def test_the_grip_reads_a_closing_hand() -> None:
+    grips = [_retarget(BodyState(left_grip=g, right_grip=g,
+                                 left_elbow=math.radians(70))).get("LHand")
+             for g in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    assert all(g is not None for g in grips), grips
+    for earlier, later in zip(grips, grips[1:], strict=False):
+        assert later > earlier - 1e-9, grips
+    assert grips[0] < 0.2 and grips[-1] > 0.8, grips
+
+
+def test_the_thumb_never_teleports_while_the_elbow_bends() -> None:
+    """A synthetic body that jumps is worse than no synthetic body: every
+    measurement taken against it reads the jump as a robot fault.
+
+    The thumb's reference direction has to come from somewhere, and every
+    candidate has a pole. Two world-axis choices were tried and both put theirs
+    inside ordinary motion -- one flipped when a bending elbow crossed
+    |y| = 0.9, the other at 55 degrees of a plain forward reach, each a 156 mm
+    jump between adjacent one-degree steps with the wrist held still. Referencing
+    the upper arm instead moves the pole onto a perfectly straight elbow, which
+    is the one place ``nao_retarget`` already refuses to solve the roll joints
+    (ELBOW_YAW_MIN_BEND), so nothing downstream can ever see it.
+    """
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "main", "libraries"))
+    from nao_retarget import ELBOW_YAW_MIN_BEND
+
+    floor = math.degrees(ELBOW_YAW_MIN_BEND)
+    for arm_fwd in (0, 35, 70, 90):
+        previous = None
+        for step in range(int((145 - floor) * 4)):
+            bend = floor + step * 0.25
+            state = BodyState(left_wrist_roll=0.4,
+                              left_elbow=math.radians(bend),
+                              left_arm_fwd=math.radians(arm_fwd))
+            kps = build_pose(state, 0.0, 0).keypoints
+            wrist, thumb = kps["left_hand_root"], kps["left_thumb"]
+            current = (thumb.x - wrist.x, thumb.y - wrist.y, thumb.z - wrist.z)
+            if previous is not None:
+                jump = math.dist(current, previous)
+                assert jump < 5.0, (
+                    f"thumb moved {jump:.1f} mm in a 0.25 deg elbow step at "
+                    f"bend {bend:.2f}, arm_fwd {arm_fwd}")
+            previous = current

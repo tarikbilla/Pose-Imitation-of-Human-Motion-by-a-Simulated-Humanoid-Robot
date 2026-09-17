@@ -40,7 +40,20 @@ class SkeletonOverlay:
     def _ensure_window(self) -> None:
         if self.show and not self._window_created:
             cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+            # Size the window to fit the DESKTOP, not the frame. Capture is
+            # 1920x1080 (configs/default.yaml input.width/height) and so is the
+            # screen, so a window opened at the frame's natural size is larger
+            # than the usable desktop once the title bar and taskbar are taken
+            # out -- the viewer then sees a CROP of the feed and reads it as the
+            # camera being zoomed in. WINDOW_NORMAL scales, so an explicit
+            # smaller size shows the whole frame instead of part of it.
+            cv2.resizeWindow(self.window_name, *self._preferred_size())
             self._window_created = True
+
+    @staticmethod
+    def _preferred_size() -> tuple[int, int]:
+        """Largest 16:9 box that leaves room for window chrome, capped at 720p."""
+        return (1280, 720)
 
     def draw(
         self,
@@ -104,13 +117,22 @@ class SkeletonOverlay:
             f"Status: {status}",
             *extra_hud,
         ]
-        y = 28
+        # Dark strip behind the text. Without it the HUD is green-on-white
+        # wherever the frame is bright -- this room has two sunlit windows
+        # directly behind the subject -- and unreadable text reads as visual
+        # noise rather than as information.
+        pad, line_h = 8, 26
+        box_h = pad * 2 + line_h * len(lines)
+        strip = canvas[0:box_h, 0:520]
+        cv2.addWeighted(strip, 0.35, np.zeros_like(strip), 0.65, 0, strip)
+
+        y = pad + 18
         for line in lines:
             cv2.putText(
                 canvas, line, (12, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, HUD_COLOR, 2, cv2.LINE_AA,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, HUD_COLOR, 1, cv2.LINE_AA,
             )
-            y += 24
+            y += line_h
 
     def show_frame(self, canvas: np.ndarray) -> bool:
         """Display the canvas. Returns False if the user requested exit."""

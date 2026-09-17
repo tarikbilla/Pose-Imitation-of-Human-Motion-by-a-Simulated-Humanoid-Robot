@@ -12,8 +12,8 @@ from pathlib import Path
 import cv2
 
 from src.perception import metrabs_model
+from src.perception.action_cues import ActionCue
 from src.perception.gait_cues import GaitCueExtractor
-from src.perception.landmarks import POSE_LANDMARKS
 from src.perception.pose_estimator import PoseEstimator
 from src.perception.video_input import VideoSource
 from src.perception.visualizer import SkeletonOverlay
@@ -159,10 +159,17 @@ class PoseImitationPipeline:
         gait_extractor = GaitCueExtractor(
             window_s=float(cfg.get("walk.cue_window_s", 1.3)),
             cross_window_s=float(cfg.get("walk.cross_window_s", 3.0)),
+            stop_window_s=float(cfg.get("walk.stop_window_s", 0.8)),
             amp_start=float(cfg.get("walk.amp_start", 0.08)),
             amp_stop=float(cfg.get("walk.amp_stop", 0.05)),
             conf_min=float(cfg.get("walk.cue_conf_min", 0.6)),
+            conf_grace_frames=int(cfg.get("walk.cue_conf_grace_frames", 2)),
         )
+
+        # Which lower-body CLIP the human is asking for. Separate from the gait
+        # cue above, which answers a narrower question (is there a marching
+        # rhythm) and answers it from a proxy signal. See action_cues.
+        action_cue = ActionCue()
 
         run_name = time.strftime("run_%Y%m%d_%H%M%S")
         log_dir = Path(cfg.get("logging.output_dir", "logs")) / run_name
@@ -213,6 +220,7 @@ class PoseImitationPipeline:
                 run_logger.log_pose(pose)
 
                 gait_cmd = gait_extractor.update(pose)
+                action_cmd = action_cue.update(pose)
 
                 command = mapper.map_pose(pose)
                 if command.joint_angles_rad:
@@ -232,6 +240,7 @@ class PoseImitationPipeline:
                     bridge.send_pose_frame(
                         command, pose.keypoints,
                         gait=gait_cmd.as_dict() if walk_enabled else None,
+                        action=action_cmd.as_dict() if walk_enabled else None,
                     )
 
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
@@ -242,17 +251,21 @@ class PoseImitationPipeline:
 
                 if self.options.show_window:
                     n_joints = len(command.joint_angles_rad) if command else 0
-                    visible_landmarks = sum(
-                        1 for kp in pose.keypoints.values() if kp.visibility > 0.3
-                    )
                     hud = [
                         f"Target FPS: {fps_controller.current_fps:5.1f}",
-                        f"Joints: {n_joints}   Visible: {visible_landmarks}/{len(POSE_LANDMARKS)}",
+                        # NOT the landmark count -- _draw_hud already prints
+                        # that, and two lines saying 25/25 is one line of noise.
+                        # This is the count of RETARGETED joints, which is a
+                        # different question: landmarks are what was seen, this
+                        # is what the robot was actually told to do.
+                        f"Joints commanded: {n_joints}",
                         "Source: MeTRAbs" if estimator.is_real else "Source: SYNTHETIC",
                         f"Gait: {gait_cmd.state:5s} {gait_cmd.cadence_hz:.2f}Hz "
                         f"conf {gait_cmd.conf:.2f}",
                         f"Body yaw: {math.degrees(gait_cmd.body_yaw_rad):+6.1f} deg "
                         f"conf {gait_cmd.yaw_conf:.2f}",
+                        f"Action: {action_cmd.action:<14s} conf {action_cmd.confidence:.2f}",
+                        f"  {action_cmd.reason[:46]}",
                     ]
                     h, w = image.shape[:2]
                     canvas = overlay.draw(

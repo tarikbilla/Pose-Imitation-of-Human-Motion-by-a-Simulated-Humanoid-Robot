@@ -484,3 +484,242 @@ def test_the_leg_solve_still_reads_the_unnegated_axis() -> None:
     leg = obs.leg("L")
     assert leg is not None
     assert leg.as_targets("L")["LHipPitch"] < 0.0
+
+
+# ---------------------------------------------------------------------------
+# Elbow range compression (2026-09-10). Reported as "upper body sometimes works
+# wrong"; measured as RElbowRoll sitting on its hardware stop 26.9% of the run.
+# ---------------------------------------------------------------------------
+def test_ordinary_elbow_bends_are_untouched() -> None:
+    """Below the knee the mapping must be exactly 1:1.
+
+    76% of the frames in the live session were under 60 deg of bend. A plain
+    rescale would have shrunk all of them -- trading a visible fault (a frozen
+    arm) for a dull one (a timid arm).
+    """
+    from nao_retarget import ELBOW_LINEAR_RAD, _elbow_bend_to_nao
+    for deg in (0.0, 5.0, 23.6, 45.0, 59.0):
+        bend = math.radians(deg)
+        assert _elbow_bend_to_nao(bend) == pytest.approx(bend), (
+            f"{deg} deg of bend was rescaled; ordinary gestures must pass through")
+    assert _elbow_bend_to_nao(ELBOW_LINEAR_RAD) == pytest.approx(ELBOW_LINEAR_RAD)
+
+
+def test_a_deeply_bent_human_elbow_never_pins_the_joint() -> None:
+    """Past 88.5 deg the old 1:1 map clamped, and a clamped joint has stopped
+    imitating -- it holds still through the part of the motion with the most
+    travel in it."""
+    from nao_retarget import ELBOW_NAO_MAX_RAD, _elbow_bend_to_nao
+    for deg in (90.0, 110.0, 131.7, 150.0, 175.0, 180.0):
+        out = _elbow_bend_to_nao(math.radians(deg))
+        assert out <= ELBOW_NAO_MAX_RAD + 1e-9, f"{deg} deg mapped past the stop"
+    # A fully folded human arm reaches the stop but nothing beyond it saturates
+    # EARLIER than that, so the response is still live at 110 and 130 deg.
+    assert _elbow_bend_to_nao(math.radians(110.0)) < ELBOW_NAO_MAX_RAD - 1e-6
+    assert _elbow_bend_to_nao(math.radians(131.7)) < ELBOW_NAO_MAX_RAD - 1e-6
+
+
+def test_the_elbow_map_is_monotonic() -> None:
+    """More human bend must always mean at least as much robot bend: a
+    non-monotonic map would make the elbow travel BACKWARDS mid-gesture."""
+    from nao_retarget import _elbow_bend_to_nao
+    prev = -1.0
+    for i in range(0, 361):
+        out = _elbow_bend_to_nao(math.radians(i * 0.5))
+        assert out >= prev - 1e-12, f"map decreased at {i * 0.5} deg"
+        prev = out
+
+
+def test_the_elbow_map_is_robust_to_junk() -> None:
+    from nao_retarget import ELBOW_NAO_MAX_RAD, _elbow_bend_to_nao
+    assert _elbow_bend_to_nao(-1.0) == 0.0
+    assert _elbow_bend_to_nao(0.0) == 0.0
+    assert _elbow_bend_to_nao(50.0) <= ELBOW_NAO_MAX_RAD + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Hand / roll joints (2026-09-16). ElbowYaw and WristYaw sat at 0.0 rad for the
+# project's whole life: a roll joint turns about the axis its own bone lies
+# along, so shoulder/elbow/wrist positions -- however accurate -- cannot see it.
+# The cure is more landmarks, so these tests are built on the hand markers.
+#
+# Verified by ROUND TRIP through NAO's own arm chain, Ry.Rz.Rx.Rz.Rx, which is
+# the chain balance.py builds from Nao.urdf. Landmarks are generated from known
+# joint angles and the retargeter has to recover them.
+# ---------------------------------------------------------------------------
+UPPER_ARM_MM, FOREARM_MM, HAND_MM, THUMB_MM = 300.0, 260.0, 190.0, 110.0
+
+
+def _nao_to_camera(v):
+    """NAO torso axes -> the camera frame _facing_subject() sets up.
+
+    That figure makes TorsoFrame right=(-1,0,0), up=(0,-1,0), forward=(0,0,1),
+    so NAO's +X (chest) is -forward, +Y (left) is -right and +Z (up) is up.
+    """
+    a, b, c = v
+    return (b, -c, -a)
+
+
+def _chain(sp, sr, ey, er, wy):
+    """Upper-arm, forearm and thumb directions in NAO torso axes."""
+    from nao_retarget import _rot_x, _rot_y, _rot_z
+
+    def shoulder(v):
+        return _rot_y(_rot_z(v, sr), sp)
+
+    upper = shoulder((1.0, 0.0, 0.0))
+    fore = shoulder(_rot_x(_rot_z((1.0, 0.0, 0.0), er), ey))
+    # The thumb is a hand-fixed axis: +Y of the hand frame, which is what
+    # HAND_YAW_SIGN names. WristYaw is the only joint that can move it.
+    thumb = shoulder(_rot_x(_rot_z(_rot_x((0.0, 1.0, 0.0), wy), er), ey))
+    return upper, fore, thumb
+
+
+def _hand_subject(side="L", sp=0.0, sr=0.0, ey=0.0, er=-0.8, wy=0.0, grip=0.0):
+    """A camera-facing figure whose ``side`` arm is at the given NAO angles."""
+    sh_y, half_sh = -500.0, 190.0
+    ls, rs = (half_sh, sh_y, 0.0), (-half_sh, sh_y, 0.0)
+    shoulder = ls if side == "L" else rs
+    upper, fore, thumb = _chain(sp, sr, ey, er, wy)
+    u, f, t = (_nao_to_camera(v) for v in (upper, fore, thumb))
+
+    def step(origin, direction, length):
+        return tuple(origin[i] + direction[i] * length for i in range(3))
+
+    elbow = step(shoulder, u, UPPER_ARM_MM)
+    wrist = step(elbow, f, FOREARM_MM)
+    # A closing hand shortens the visible hand and swings the thumb across the
+    # palm toward the fingers -- i.e. ALONG the forearm, the one direction
+    # WristYaw cannot see. That is deliberate: it is what makes the
+    # grip-invariance test below mean something.
+    reach = HAND_MM * (1.0 - 0.6 * grip)
+    lean = 0.5 * grip
+    finger = step(wrist, f, reach)
+    thumb_pt = tuple(
+        wrist[i] + THUMB_MM * (t[i] * (1.0 - lean) + f[i] * lean) for i in range(3)
+    )
+    pre = "left_" if side == "L" else "right_"
+    other = "right_" if side == "L" else "left_"
+    other_sh = rs if side == "L" else ls
+    return {
+        "left_shoulder": [*ls, 1.0],
+        "right_shoulder": [*rs, 1.0],
+        "left_hip": [100.0, 0.0, 0.0, 1.0],
+        "right_hip": [-100.0, 0.0, 0.0, 1.0],
+        "nose": [0.0, sh_y - 240.0, 0.0, 1.0],
+        pre + "elbow": [*elbow, 1.0],
+        pre + "wrist": [*wrist, 1.0],
+        pre + "hand_root": [*wrist, 1.0],
+        pre + "finger": [*finger, 1.0],
+        pre + "thumb": [*thumb_pt, 1.0],
+        other + "elbow": [other_sh[0], other_sh[1] + UPPER_ARM_MM, other_sh[2], 1.0],
+        other + "wrist": [other_sh[0], other_sh[1] + UPPER_ARM_MM + FOREARM_MM,
+                          other_sh[2], 1.0],
+    }
+
+
+ROLL_POSES = [
+    # (shoulder pitch, shoulder roll, elbow yaw, elbow roll, wrist yaw)
+    (0.0, 0.0, 0.0, -0.80, 0.0),
+    (0.0, 0.0, 0.70, -0.80, 0.0),
+    (0.0, 0.0, -0.70, -0.80, 0.0),
+    (0.5, 0.3, 0.40, -1.00, 0.6),
+    (1.2, 0.2, -1.00, -0.60, -0.9),
+    (-0.6, 0.4, 0.90, -1.20, 1.2),
+]
+
+
+@pytest.mark.parametrize(("sp", "sr", "ey", "er", "wy"), ROLL_POSES)
+def test_the_roll_joints_round_trip_through_naos_own_arm_chain(sp, sr, ey, er, wy):
+    """Generate landmarks from known angles; the solve must recover them."""
+    kps = _hand_subject("L", sp=sp, sr=sr, ey=ey, er=er, wy=wy)
+    t = retarget_upper_body(kps)
+    assert t["LElbowYaw"] == pytest.approx(ey, abs=2e-3)
+    assert t["LWristYaw"] == pytest.approx(wy, abs=2e-3)
+
+
+def test_the_roll_joints_round_trip_on_the_right_arm_too():
+    """The chain is the same on both sides even though ShoulderRoll's SIGN is
+    not -- the solve has to convert back out of the outward-positive convention
+    the shoulder reports in, and forgetting to would only show up here."""
+    for sp, sr, ey, er, wy in ROLL_POSES:
+        kps = _hand_subject("R", sp=sp, sr=-sr, ey=ey, er=-er, wy=wy)
+        t = retarget_upper_body(kps)
+        assert t["RElbowYaw"] == pytest.approx(ey, abs=2e-3), (sp, sr, ey, er, wy)
+        assert t["RWristYaw"] == pytest.approx(wy, abs=2e-3), (sp, sr, ey, er, wy)
+
+
+def test_a_straight_arm_omits_the_elbow_yaw_rather_than_guessing():
+    """With the elbow straight the forearm lies ON the ElbowYaw axis: every
+    value of the joint puts it in the same place, so there is nothing to read.
+    Omitting it makes the driver hold the last value; returning 0 would snap the
+    forearm flat every time the subject let their arm hang."""
+    t = retarget_upper_body(_hand_subject("L", er=-0.05, ey=0.9))
+    assert "LElbowYaw" not in t
+    assert "LWristYaw" not in t, "wrist yaw is solved in the forearm frame, which "\
+        "is not known when the elbow yaw is not"
+
+
+def test_a_bent_arm_does_solve_the_elbow_yaw():
+    t = retarget_upper_body(_hand_subject("L", er=-0.8, ey=0.9))
+    assert t["LElbowYaw"] == pytest.approx(0.9, abs=2e-3)
+
+
+def test_wrist_yaw_is_unchanged_by_closing_the_hand():
+    """Grip moves the thumb ALONG the forearm, which is the one axis WristYaw
+    cannot see -- so the solve has to project that component out. Without it,
+    making a fist would twist the robot's wrist."""
+    angles = [
+        retarget_upper_body(_hand_subject("L", er=-0.9, ey=0.3, wy=0.7, grip=g))
+        .get("LWristYaw")
+        for g in (0.0, 0.3, 0.6, 0.9)
+    ]
+    assert all(a is not None for a in angles)
+    assert max(angles) - min(angles) < 1e-6, angles
+
+
+def test_grip_tracks_the_thumb_to_finger_distance():
+    grips = [retarget_upper_body(_hand_subject("L", grip=g)).get("LHand")
+             for g in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    assert all(g is not None for g in grips)
+    for earlier, later in zip(grips, grips[1:], strict=False):
+        assert later > earlier - 1e-9, f"grip must be monotonic: {grips}"
+    assert grips[0] < 0.25 and grips[-1] > 0.75, grips
+
+
+def test_grip_is_invariant_to_how_far_away_the_subject_stands():
+    """Measured as a ratio of the hand's own length, so it cannot drift with
+    camera distance the way an absolute millimetre threshold would."""
+    near = retarget_upper_body(_hand_subject("L", grip=0.5))["LHand"]
+    far = _hand_subject("L", grip=0.5)
+    scaled = {k: [v[0] * 0.4, v[1] * 0.4, v[2] * 0.4, v[3]] for k, v in far.items()}
+    assert retarget_upper_body(scaled)["LHand"] == pytest.approx(near, abs=1e-6)
+
+
+def test_elbow_yaw_needs_no_hand_landmarks_at_all():
+    """The happy surprise, and worth pinning because it is easy to assume
+    otherwise: ElbowYaw is fixed by the FOREARM's direction given a known
+    shoulder and elbow bend, so it is solvable from plain coco_19 -- no hand
+    markers, no skeleton change. Only WristYaw and the grip need the hand.
+
+    (It also survives the elbow's range compression: the solve reads only the
+    DIRECTION of the off-axis part, and _elbow_bend_to_nao scales its magnitude
+    without touching its sign.)
+    """
+    kps = _hand_subject("L", sp=0.4, er=-0.9, ey=0.55)
+    for name in ("left_hand_root", "left_thumb", "left_finger"):
+        kps.pop(name)
+    t = retarget_upper_body(kps)
+    assert t["LElbowYaw"] == pytest.approx(0.55, abs=2e-3)
+    assert "LWristYaw" not in t and "LHand" not in t
+    assert "LShoulderPitch" in t and "LElbowRoll" in t
+
+
+def test_an_invisible_thumb_still_allows_the_elbow_yaw():
+    """The two joints have different evidence: ElbowYaw needs only the forearm,
+    WristYaw needs the thumb as well. Losing the thumb must not cost both."""
+    kps = _hand_subject("L", er=-0.9, ey=0.5)
+    kps["left_thumb"][3] = 0.0
+    t = retarget_upper_body(kps)
+    assert t["LElbowYaw"] == pytest.approx(0.5, abs=2e-3)
+    assert "LWristYaw" not in t

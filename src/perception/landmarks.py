@@ -1,10 +1,41 @@
-"""MeTRAbs ``coco_19`` skeleton landmark definitions.
+"""MeTRAbs skeleton landmark definitions.
 
 Reference: https://github.com/isarandi/metrabs, docs/API.md ("Skeleton
-Conventions"). ``coco_19`` was picked because it is the closest existing
-MeTRAbs convention to the joint set this project actually uses (shoulders,
-elbows, wrists, hips, knees, ankles, face points) without SMPL's extra
-spine/collar joints or hand joints we have no use for.
+Conventions"). The 19 body landmarks match MeTRAbs' ``coco_19`` convention
+(shoulders, elbows, wrists, hips, knees, ankles, face points) without SMPL's
+extra spine/collar joints.
+
+Hands
+-----
+``coco_19`` stops at the wrist, which leaves NAO's ``ElbowYaw``, ``WristYaw``
+and its finger motors with nothing to track -- a roll joint rotates about the
+axis its own bone lies along, so no accuracy on shoulder/elbow/wrist reveals
+it. :data:`HAND_LANDMARKS` adds a thumb and a finger marker per side, which is
+enough to pin the hand's own frame and so to solve all three.
+
+Those points exist only in MeTRAbs' **full 122-joint superset**
+(``pose.skeleton: ""``). Asking for the superset costs nothing: every named
+skeleton is a plain index gather out of it -- measured at 152.1 ms/call for the
+superset against 152.4 ms for ``coco_19`` -- so the argument picks a selection,
+not a different inference.
+
+THE ALIAS TRAP, AND IT IS SILENT
+--------------------------------
+The superset carries *two* joints for most limbs: a bare SMPL joint (``lwri``,
+index 19) and a CMU-Panoptic surface marker (``lwri_cmu_panoptic``, index 64).
+They are different points -- SMPL's sits medially, inside the body. ``coco_19``
+REPORTS the bare names but SELECTS the ``_cmu_panoptic`` indices, verified
+index by index against ``metrabs_eff2s_y4``:
+
+    coco_19 'lwri' -> superset [ 64] lwri_cmu_panoptic
+    coco_19 'lsho' -> superset [ 56] lsho_cmu_panoptic       (all 19 like this)
+
+So a name-ordered alias tuple that happens to try ``lwri`` first resolves to
+the SMPL joint the moment the skeleton is switched to the superset, and every
+arm and leg landmark quietly moves inside the body -- with no error, no warning
+and a skeleton that still looks plausible. :data:`SUPERSET_NAMES` is therefore
+authoritative and is prepended to each alias tuple below, so the superset
+reproduces ``coco_19`` exactly. Pinned by ``tests/test_landmarks.py``.
 
 The abbreviated aliases below (``lsho``, ``lelb``, ``pelv`` ...) are the names
 a live ``metrabs_eff2s_y4`` model actually reports for ``coco_19``; they are
@@ -47,7 +78,65 @@ POSE_LANDMARKS: list[str] = [
     "pelvis",   # coco_19 extension over plain 17-point COCO: hip midpoint
 ]
 
+# Hand detail, present only in the 122-joint superset (pose.skeleton: "").
+# OPTIONAL: running coco_19 simply omits them and the hand joints go untracked,
+# which is what the whole project did before these were added.
+#
+# All three markers on a side come from the SAME dataset convention (H36M), and
+# that is deliberate: the hand solve only ever uses DIFFERENCES between them
+# (wrist->finger for the hand's long axis, wrist->thumb for which way the palm
+# faces), so what matters is that they are mutually consistent, not that they
+# agree with the cmu_panoptic wrist the arm chain uses. Mixing an SMPL hand
+# centre with an H36M thumb would put a fictitious twist in the palm frame.
+HAND_LANDMARKS: list[str] = [
+    "left_hand_root",    # H36M wrist marker: the origin of the hand frame
+    "left_thumb",
+    "left_finger",
+    "right_hand_root",
+    "right_thumb",
+    "right_finger",
+]
+
+# Landmarks the pipeline cannot start without. The hand ones are not among
+# them: they are absent from every skeleton but the superset.
+REQUIRED_LANDMARKS: list[str] = list(POSE_LANDMARKS)
+OPTIONAL_LANDMARKS: frozenset[str] = frozenset(HAND_LANDMARKS)
+
+POSE_LANDMARKS = POSE_LANDMARKS + HAND_LANDMARKS
+
 NUM_LANDMARKS: int = len(POSE_LANDMARKS)
+
+# The superset joint name each canonical landmark MUST resolve to. Read off a
+# live ``metrabs_eff2s_y4`` (``per_skeleton_indices``/``per_skeleton_joint_names``)
+# rather than guessed -- see "THE ALIAS TRAP" in the module docstring for what
+# happens without it.
+SUPERSET_NAMES: dict[str, str] = {
+    "nose": "nose_cmu_panoptic",
+    "left_eye": "leye_cmu_panoptic",
+    "right_eye": "reye_cmu_panoptic",
+    "left_ear": "lear_cmu_panoptic",
+    "right_ear": "rear_cmu_panoptic",
+    "left_shoulder": "lsho_cmu_panoptic",
+    "right_shoulder": "rsho_cmu_panoptic",
+    "left_elbow": "lelb_cmu_panoptic",
+    "right_elbow": "relb_cmu_panoptic",
+    "left_wrist": "lwri_cmu_panoptic",
+    "right_wrist": "rwri_cmu_panoptic",
+    "left_hip": "lhip_cmu_panoptic",
+    "right_hip": "rhip_cmu_panoptic",
+    "left_knee": "lkne_cmu_panoptic",
+    "right_knee": "rkne_cmu_panoptic",
+    "left_ankle": "lank_cmu_panoptic",
+    "right_ankle": "rank_cmu_panoptic",
+    "neck": "neck_cmu_panoptic",
+    "pelvis": "pelv_cmu_panoptic",
+    "left_hand_root": "lwri_h36m",
+    "left_thumb": "lthu_h36m",
+    "left_finger": "lfin_h36m",
+    "right_hand_root": "rwri_h36m",
+    "right_thumb": "rthu_h36m",
+    "right_finger": "rfin_h36m",
+}
 
 # Best-effort mapping from OUR canonical name to the raw name(s) MeTRAbs might
 # use for the same joint, tried in order, case-insensitively. Matching also
@@ -74,7 +163,28 @@ CANONICAL_TO_RAW_ALIASES: dict[str, tuple[str, ...]] = {
     "right_ankle": ("right_ankle", "rankle", "r_ankle", "rank"),
     "neck": ("neck",),
     "pelvis": ("pelvis", "pelv", "root", "hip"),
+    # Hand markers. No short bare aliases (``lthu``/``lfin``) are listed ahead
+    # of the superset name for the same reason as above -- h36m_25 reports the
+    # bare form, the superset reports the suffixed one, and only one of them is
+    # the marker we measured.
+    "left_hand_root": ("lwri_h36m", "left_hand_root"),
+    "left_thumb": ("lthu_h36m", "left_thumb", "lthu"),
+    "left_finger": ("lfin_h36m", "left_finger", "lfin"),
+    "right_hand_root": ("rwri_h36m", "right_hand_root"),
+    "right_thumb": ("rthu_h36m", "right_thumb", "rthu"),
+    "right_finger": ("rfin_h36m", "right_finger", "rfin"),
 }
+
+# Put the authoritative superset name at the FRONT of every alias tuple, so a
+# first-match-wins lookup against the 122-joint superset lands on the joint
+# coco_19 would have selected rather than on its same-named SMPL neighbour.
+for _canonical, _raw in SUPERSET_NAMES.items():
+    _aliases = CANONICAL_TO_RAW_ALIASES.get(_canonical, ())
+    if _raw not in _aliases[:1]:
+        CANONICAL_TO_RAW_ALIASES[_canonical] = (_raw,) + tuple(
+            a for a in _aliases if a != _raw
+        )
+del _canonical, _raw, _aliases
 
 # Bone connections for the skeleton overlay, as pairs of canonical names. Used
 # as a fallback when the live model's own edge list (via
@@ -99,6 +209,13 @@ POSE_CONNECTIONS: tuple[tuple[str, str], ...] = (
     ("left_knee", "left_ankle"),
     ("right_hip", "right_knee"),
     ("right_knee", "right_ankle"),
+    # Hand detail. Drawn from the WRIST rather than from left_hand_root so the
+    # overlay shows the hand attached to the arm the robot is actually driving;
+    # the solve itself uses left_hand_root (see HAND_LANDMARKS).
+    ("left_wrist", "left_finger"),
+    ("left_wrist", "left_thumb"),
+    ("right_wrist", "right_finger"),
+    ("right_wrist", "right_thumb"),
 )
 
 

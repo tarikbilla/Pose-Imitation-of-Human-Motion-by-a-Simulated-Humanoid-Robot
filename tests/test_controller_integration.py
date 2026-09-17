@@ -2599,3 +2599,299 @@ def test_one_shot_clips_are_untouched_by_the_cyclic_path(harness) -> None:
     harness.spin(10, STANDING, MARCH_GAIT)
     assert c._cycles_walked == 0
     assert c._cycle_state == ""
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-10 latency work: the two controller-side defects behind
+# "the robot takes 5-7 s to start" and "the robot sometimes falls".
+# ---------------------------------------------------------------------------
+def test_a_dithering_planner_cannot_ramp_the_legs_forever(harness, monkeypatch):
+    """CLIP_PREPARE_TIMEOUT_S must bound the RAMP, not just one action.
+
+    ``_prepare_since`` is restarted whenever the planned action changes, so a
+    planner alternating forward/turn_left rewound the 2.5 s timeout forever.
+    Measured in log 1788865278: one episode sat in prepare for 9.50 s -- 480
+    ticks, zero clips played, 6 action flips -- while the longest stretch on any
+    single action was 2.67 s, so the timeout never fired once. The legs stood in
+    a one-footed ramp for 9.5 s and the episode ended in a fall. A second,
+    flip-immune clock (CLIP_PREPARE_RUN_TIMEOUT_S) is what stops it.
+    """
+    ctl = harness.ctl
+    mod = harness.mod
+    # A stance that exists but is never reached: the ramp can never finish.
+    monkeypatch.setattr(ctl.motion, "entry_pose",
+                        lambda action: {"LKneePitch": 1.0, "RKneePitch": 1.0})
+    monkeypatch.setattr(ctl.driver, "approach_leg_pose",
+                        lambda *a, **k: False)
+
+    now = 0.0
+    abandoned_at = None
+    # Flip the planned action every 1.0 s -- comfortably inside the 2.5 s
+    # per-action timeout, which is exactly what defeated it.
+    for i in range(400):
+        action = "forward" if (int(now) % 2 == 0) else "turn_left"
+        ctl._ready_to_play(now, action)
+        if ctl._preparing is None and i > 0:
+            abandoned_at = now
+            break
+        now += 0.02
+
+    assert abandoned_at is not None, (
+        "the prepare ramp never terminated: a dithering planner can still hold "
+        "the legs in a ramp indefinitely")
+    assert abandoned_at <= mod.CLIP_PREPARE_RUN_TIMEOUT_S + 0.1, (
+        f"abandoned after {abandoned_at:.2f}s, which is past "
+        f"CLIP_PREPARE_RUN_TIMEOUT_S={mod.CLIP_PREPARE_RUN_TIMEOUT_S}")
+
+
+def test_reaching_the_stance_clears_the_ramp_clock(harness, monkeypatch):
+    """An honest prepare that succeeds must not leave the run clock armed."""
+    ctl = harness.ctl
+    monkeypatch.setattr(ctl.motion, "entry_pose",
+                        lambda action: {"LKneePitch": 1.0})
+    monkeypatch.setattr(ctl.driver, "approach_leg_pose", lambda *a, **k: False)
+    ctl._ready_to_play(0.0, "forward")
+    assert ctl._prepare_run_since is not None
+    monkeypatch.setattr(ctl.driver, "approach_leg_pose", lambda *a, **k: True)
+    assert ctl._ready_to_play(0.5, "forward") is True
+    assert ctl._prepare_run_since is None, (
+        "a successful prepare left the run clock armed, so the NEXT clip would "
+        "inherit this one's elapsed time and be abandoned early")
+
+
+def test_clip_handover_rate_caps_the_leg_targets(harness):
+    """Coming out of a clip must be ramped, as going in already is.
+
+    Measured in log 1788865278: 13 of 13 clip->pose handovers drove
+    support_margin_x to between -0.046 and -0.091 m (the centre of mass off the
+    front of the feet), and all three falls in that session began within
+    0.13-1.32 s of one. Going INTO a clip has always been ramped
+    (approach_leg_pose); coming out of one commanded the whole gap -- up to
+    0.5 rad -- on the next tick.
+    """
+    from pose_control_utils import ALL_LEG_JOINTS
+
+    driver = harness.ctl.driver
+    leg = "LKneePitch"
+    assert leg in ALL_LEG_JOINTS
+
+    # The clip owned the body and left the knee at 0.0; the human wants 0.9 rad.
+    driver.measured[leg] = 0.0
+    driver.base_targets[leg] = 0.0
+    driver.release_to_motion([leg])
+    driver.reclaim_from_motion()
+
+    driver._apply_targets({leg: 0.9}, 1.00)
+    first = driver.base_targets[leg]
+    step = driver.LEG_POSE_RATE * 0.02
+    assert first <= step + 1e-6, (
+        f"the first post-handover leg target moved {first:.3f} rad in one tick; "
+        f"LEG_POSE_RATE allows {step:.3f}")
+
+    # And the cap lifts once the blend window is over: full 1:1 leg tracking.
+    driver._apply_targets({leg: 0.9}, 1.00 + driver.HANDOVER_BLEND_S + 0.05)
+    driver._apply_targets({leg: 0.9}, 1.00 + driver.HANDOVER_BLEND_S + 0.07)
+    assert driver.base_targets[leg] == pytest.approx(0.9), (
+        "the handover cap never released; leg imitation is now permanently "
+        "rate-limited, which is not what it is for")
+
+
+def test_the_handover_cap_does_not_touch_the_arms(harness):
+    """Arms keep tracking right through a clip; the guard is legs-only."""
+    driver = harness.ctl.driver
+    arm = "LShoulderPitch"
+    driver.measured[arm] = 0.0
+    driver.base_targets[arm] = 0.0
+    driver.release_to_motion(["LKneePitch"])
+    driver.reclaim_from_motion()
+    driver._apply_targets({arm: 1.2}, 1.0)
+    assert driver.base_targets[arm] == pytest.approx(1.2)
+
+
+# ---------------------------------------------------------------------------
+# Hands (2026-09-16). Three things that only show up with the real controller
+# in the loop: the grip fanning out to sixteen separate phalanx motors, the arm
+# being re-commanded on every simulation step rather than only on the steps
+# that carried a camera frame, and neither of those disturbing the legs.
+# ---------------------------------------------------------------------------
+def with_hands(keypoints, grip=0.0, thumb_axis=(0.0, 0.0, 1.0)):
+    """Add hand markers to a ``subject()`` pose at a given hand closure.
+
+    The finger continues the forearm and shortens as the hand closes; the thumb
+    starts perpendicular to it and swings across the palm. Proportions are the
+    adult ones nao_retarget's GRIP_* constants were derived from (hand 0.73 of
+    the forearm, thumb 0.42), expressed as ratios so they survive the fact that
+    ``subject()`` works in normalised units rather than millimetres.
+    """
+    out = dict(keypoints)
+    for pre in ("left_", "right_"):
+        elbow, wrist = out[pre + "elbow"], out[pre + "wrist"]
+        fore = [wrist[i] - elbow[i] for i in range(3)]
+        length = math.sqrt(sum(c * c for c in fore)) or 1.0
+        fore = [c / length for c in fore]
+        # Orthogonalise the thumb axis against the forearm so "perpendicular"
+        # stays true whatever direction the arm happens to point.
+        dot = sum(thumb_axis[i] * fore[i] for i in range(3))
+        perp = [thumb_axis[i] - dot * fore[i] for i in range(3)]
+        pn = math.sqrt(sum(c * c for c in perp)) or 1.0
+        perp = [c / pn for c in perp]
+        reach = 0.73 * length * (1.0 - 0.6 * grip)
+        lean = 0.5 * grip
+        out[pre + "hand_root"] = list(wrist)
+        out[pre + "finger"] = [wrist[i] + reach * fore[i] for i in range(3)] + [1.0]
+        out[pre + "thumb"] = [
+            wrist[i] + 0.42 * length * (perp[i] * (1.0 - lean) + fore[i] * lean)
+            for i in range(3)
+        ] + [1.0]
+    return out
+
+
+OPEN_HAND = with_hands(STANDING, grip=0.0)
+CLOSED_HAND = with_hands(STANDING, grip=1.0)
+
+
+def _phalanges(harness, side="L"):
+    return [harness.angle(f"{side}Phalanx{i}") for i in range(1, 9)]
+
+
+def test_a_closing_hand_closes_every_phalanx(harness) -> None:
+    """Webots' NAO has no single hand motor -- there are eight phalanx motors
+    per hand and one measured grip, so the driver has to fan the value out.
+    Commanding one and leaving seven at the rest pose is the failure this
+    catches, and on a robot it looks like a hand that half-works."""
+    harness.spin(120, OPEN_HAND)
+    opened = _phalanges(harness)
+    harness.spin(120, CLOSED_HAND)
+    closed = _phalanges(harness)
+    assert len(set(round(a, 6) for a in closed)) == 1, \
+        f"the eight phalanges disagree: {closed}"
+    for before, after in zip(opened, closed, strict=True):
+        assert after < before - 0.05, f"phalanx did not close: {before} -> {after}"
+
+
+def test_the_grip_stays_inside_the_phalanx_limits(harness) -> None:
+    for pose in (OPEN_HAND, CLOSED_HAND, with_hands(STANDING, grip=0.5)):
+        harness.spin(60, pose)
+        for name in [f"{s}Phalanx{i}" for s in ("L", "R") for i in range(1, 9)]:
+            cfg = CONFIGS[name]
+            angle = harness.angle(name)
+            assert cfg.min_angle - 1e-6 <= angle <= cfg.max_angle + 1e-6, \
+                f"{name} at {angle} outside {cfg.min_angle}..{cfg.max_angle}"
+
+
+def test_the_arms_are_commanded_on_every_step_not_only_on_camera_frames(
+    harness,
+) -> None:
+    """The camera runs at ~12 Hz and the simulation at 50. Feeding a frame every
+    fourth step and counting motor writes separates a driver that re-commands
+    continuously from one that holds between frames -- the latter is what made
+    the arms look like they were stepping rather than moving."""
+    motor = harness.ctl.robot.motors["LShoulderPitch"]
+    harness.spin(20, OPEN_HAND, every=4)   # settle and seed the tracker
+    before = motor.commands
+    harness.spin(40, OPEN_HAND, every=4)   # 10 camera frames, 40 steps
+    written = motor.commands - before
+    assert written >= 40, (
+        f"only {written} motor writes over 40 simulation steps; the arm is "
+        "only moving when a camera frame lands")
+
+
+def test_a_moving_arm_is_not_left_behind_by_the_camera_rate(harness) -> None:
+    """The point of the velocity lead. Step the human's elbow through a sweep at
+    the camera's rate and check the robot is not trailing by more than a frame's
+    worth of travel by the end."""
+    poses = []
+    for i in range(24):
+        bend = 0.2 + 0.05 * i
+        kps = dict(STANDING)
+        for pre, sgn in (("left_", -1.0), ("right_", +1.0)):
+            elbow = kps[f"{pre}elbow"]
+            kps[f"{pre}wrist"] = [
+                elbow[0] + sgn * 0.11 * math.sin(bend),
+                elbow[1] + 0.11 * math.cos(bend),
+                elbow[2], 1.0,
+            ]
+        poses.append(kps)
+
+    harness.spin(20, poses[0], every=4)
+    for kps in poses:
+        harness.spin(4, kps, every=4)
+    settled = harness.angle("LElbowRoll")
+    # Now hold the final pose and let it converge: the gap between where the arm
+    # was while the sweep was running and where it ends up is the lag.
+    harness.spin(120, poses[-1], every=4)
+    final = harness.angle("LElbowRoll")
+    assert abs(final - settled) < 0.12, (
+        f"the arm was {abs(final - settled):.3f} rad behind the human at the end "
+        "of a steady sweep")
+
+
+def test_hands_do_not_disturb_the_legs(harness) -> None:
+    """The whole change is meant to be above the waist. A grip that reached the
+    leg joints, or an arm tick that re-ran the leg layer, would show up as the
+    legs moving while only the hand does."""
+    harness.spin(150, OPEN_HAND)
+    legs = {n: harness.angle(n) for n in
+            [f"{s}{j}" for s in ("L", "R")
+             for j in ("HipPitch", "KneePitch", "AnklePitch", "HipRoll", "AnkleRoll")]}
+    harness.spin(150, CLOSED_HAND)
+    for name, before in legs.items():
+        assert abs(harness.angle(name) - before) < 1e-6, \
+            f"{name} moved when only the hand changed"
+
+
+def test_a_model_without_finger_motors_still_runs(harness, monkeypatch) -> None:
+    """Nao.proto is fetched over the network at world-load time, so the finger
+    motor names cannot be checked against a file here. A model that does not
+    have them must degrade to no grip, not to a crash."""
+    for name in list(harness.ctl.driver.motors):
+        if "Phalanx" in name:
+            harness.ctl.driver.motors.pop(name)
+    harness.spin(60, CLOSED_HAND)
+    assert harness.angle("LShoulderPitch") != 0.0, "the arm stopped tracking"
+
+
+def test_a_departed_human_does_not_leave_the_robot_holding_a_fist(harness) -> None:
+    """The counterpart of the arms ramping back to neutral on staleness. The
+    grip is not a joint and has no rest_angle to fall back on, so it was the one
+    channel that could sit frozen on the last pose its human left behind."""
+    harness.spin(150, CLOSED_HAND)
+    closed = _phalanges(harness)
+    harness.spin(200)                      # nobody in frame: goes stale
+    released = _phalanges(harness)
+    assert all(b > a + 0.05 for a, b in zip(closed, released, strict=True)), \
+        f"the hand stayed shut after tracking was lost: {closed} -> {released}"
+
+
+# ---------------------------------------------------------------------------
+# Aimed turning: the safety property that lets the overshoot floor be dropped
+# ---------------------------------------------------------------------------
+def test_a_turn_clip_that_cannot_be_aimed_is_not_called_interruptible(harness) -> None:
+    """Somewhere safe to stop is NOT enough to loosen the turn gate.
+
+    Dropping the overshoot floor is only sound because the clip is then aimed --
+    stopped at the rung that best serves the heading error. These fixture clips
+    have 60 certified stopping points and command no rotation whatsoever, so
+    there is nowhere to aim; loosening the gate for them would let the loop hunt
+    below the finest error the clip can serve, which is the limit cycle
+    test_a_multi_clip_rotation_keeps_going_until_aligned exists to catch.
+
+    So the two tests are the same statement from both sides: this one says the
+    clip is excluded, that one says what goes wrong if it is not.
+    """
+    player = harness.ctl.motion
+    assert player.safe_exits("turn_left"), "fixture clip should have safe exits"
+    assert player.turn("turn_left") is None, "fixture clip does not rotate"
+    assert "turn_left" not in player.interruptible
+    # A clip that is not a turn is judged on its safe exits alone, as before.
+    assert ("forward" in player.interruptible) == bool(player.safe_exits("forward"))
+
+
+def test_dropping_a_clip_forgets_that_it_was_interruptible(harness) -> None:
+    """The set is cached per session; a clip Webots refused must leave it, or the
+    planner keeps choosing a clip that is no longer on the books."""
+    player = harness.ctl.motion
+    before = player.interruptible
+    assert player.interruptible is before          # cached, not rebuilt per step
+    player.drop("forward")
+    assert "forward" not in player.interruptible

@@ -131,6 +131,29 @@ LIFT_FULL_KNEE = 0.190
 CROUCH_FULL_DROP = 0.28
 KNEE_STRAIGHT_DEADZONE = 0.20  # rad of knee bend treated as "standing straight"
 KNEE_BEND_RANGE = 1.30         # rad of human knee bend mapped to full crouch
+
+# --- Elbow: a human elbow out-bends NAO's by 60 deg ------------------------
+# A human elbow flexes to about 150 deg; NAO's ElbowRoll stops at 88.5 deg. The
+# bend was handed over 1:1, so every bend past 88.5 deg clamped to the stop --
+# and a clamped joint has stopped imitating: it holds still through exactly the
+# part of the motion the subject is putting the most travel into, which reads as
+# "the arm is broken", not "the arm is at its limit". Measured over the
+# 2026-09-10 live session (run_20260910_140624, 4653 frames with both arms
+# visible): the human bend had a median of 24 deg but a p90 of 68 deg (left) and
+# 132 deg (right), putting 8.0% of left-elbow and 19.1% of right-elbow frames
+# past the stop; on the robot side the commanded RElbowRoll sat pinned against
+# its stop in 26.9% of non-stale frames and LElbowRoll in 9.6%.
+#
+# So the range is COMPRESSED instead, with a soft knee rather than a straight
+# rescale. A straight rescale would fix the saturation by making every ordinary
+# gesture smaller -- the median 24 deg bend would come out at 16 deg -- which
+# trades a visible fault for a dull one. Below the knee the mapping stays exactly
+# 1:1, so normal gestures are untouched; above it the remaining human travel is
+# folded into the joint's remaining travel, so the response stays monotone all
+# the way to a fully folded arm and never flatlines.
+ELBOW_LINEAR_RAD = 1.047      # 60 deg: mapped 1:1 (covers the median and p75)
+ELBOW_HUMAN_MAX_RAD = 2.618   # 150 deg: a fully folded human elbow
+ELBOW_NAO_MAX_RAD = 1.545     # 88.5 deg: NAO's ElbowRoll mechanical stop
 # Deepest symmetric crouch we ask for (hip 40 deg, knee 80 deg). Not a stability
 # limit: because NAO's thigh and shank are within 3 mm of the same length, the
 # Hip = -u / Knee = +2u / Ankle = -u posture keeps the ankle under the hip -- and
@@ -201,6 +224,183 @@ def _angle_between(a: Vec, b: Vec) -> float:
     return math.acos(_clamp(dot / (_norm(a) * _norm(b)), -1.0, 1.0))
 
 
+def _elbow_bend_to_nao(bend: float) -> float:
+    """Human elbow flexion (rad, 0 = straight) -> NAO ElbowRoll MAGNITUDE.
+
+    Identity below :data:`ELBOW_LINEAR_RAD`; above it the rest of the human
+    range is compressed into the rest of NAO's, so the joint keeps responding
+    instead of sitting on its stop. See the constants for the measurements that
+    motivated it. The caller applies the per-side sign.
+    """
+    bend = max(0.0, bend)
+    if bend <= ELBOW_LINEAR_RAD:
+        return bend
+    human_span = ELBOW_HUMAN_MAX_RAD - ELBOW_LINEAR_RAD
+    nao_span = ELBOW_NAO_MAX_RAD - ELBOW_LINEAR_RAD
+    if human_span <= SWING_DEGENERATE or nao_span <= 0.0:
+        return min(bend, ELBOW_NAO_MAX_RAD)
+    over = min(bend, ELBOW_HUMAN_MAX_RAD) - ELBOW_LINEAR_RAD
+    return ELBOW_LINEAR_RAD + nao_span * (over / human_span)
+
+
+# ---------------------------------------------------------------------------
+# NAO arm chain (for the roll joints)
+# ---------------------------------------------------------------------------
+# From the kinematic model in balance.py, which is built from Nao.urdf:
+#
+#   ShoulderPitch about Y -> ShoulderRoll about Z -> ElbowYaw about X
+#                         -> ElbowRoll about Z    -> WristYaw about X
+#
+# so the whole arm is Ry(sp).Rz(sr).Rx(ey).Rz(er).Rx(wy), each link lying along
+# the local +X when its joints are zero.
+#
+# WHY THESE TWO JOINTS WERE NEVER TRACKED. A roll joint rotates about the axis
+# its own bone lies along, so no accuracy on the bone's ENDPOINTS can reveal it:
+# shoulder, elbow and wrist positions fix the arm's shape and say nothing about
+# its twist. LElbowYaw and LWristYaw therefore sat at 0.0 rad for the project's
+# whole life while every other arm joint tracked -- and nothing looked broken,
+# because they had MotorConfigs and were in UPPER_BODY_JOINTS all along. The
+# only cure is more landmarks, which is what the hand markers are for.
+HAND_YAW_SIGN = 1.0
+"""Which way the human's thumb maps onto NAO's hand-frame +Y.
+
+The one number here that geometry cannot settle. It depends on which way the
+palm faces at ``WristYaw = 0`` in ``Nao.proto``, and that proto is an
+EXTERNPROTO fetched at world-load time -- it is not on disk to read (searched).
+Everything else in this module is derived and round-trip tested. **If the
+wrists rotate the wrong way, flip this one constant to -1.0**; it shifts both
+WristYaw solves by pi and changes nothing else.
+"""
+
+# Below this |sin(ElbowRoll)| the forearm lies along the ElbowYaw axis and the
+# yaw is geometrically unobservable -- every value of it puts the forearm in the
+# same place, so a solve would be reading noise. ~0.20 rad of bend.
+ELBOW_YAW_MIN_BEND = 0.20
+
+# Minimum thumb offset from the forearm axis, as a fraction of the hand's own
+# length, before the palm's orientation is believed. A hand seen end-on, or a
+# fist with the thumb folded along the fingers, gives a near-zero lever arm and
+# an angle that spins with the noise.
+WRIST_YAW_MIN_SPAN = 0.06
+
+# Grip: thumb-to-finger distance, as a fraction of FOREARM length. An open hand
+# holds the thumb well clear of the fingers; a fist brings them together.
+#
+# Normalised against the forearm and not against the hand, which is the obvious
+# choice and is self-defeating: the finger marker moves back toward the wrist as
+# the fingers curl, so hand length shrinks along with the thumb-finger gap and
+# their ratio barely moves. Measured on the synthetic hand it stayed above 0.83
+# from open palm to closed fist -- a grip signal that could not tell them apart.
+# The forearm is fixed by anatomy, so it makes an honest ruler, and dividing by
+# any length at all is what keeps the reading free of camera distance.
+#
+# The two ends sit inside the anatomical extremes so an ordinary relaxed hand
+# reaches fully open rather than sitting permanently half-shut. Re-measure them
+# for a real subject with `scripts/tune_arm_tracking.py --grip` against a
+# recorded session; these come from adult proportions (forearm 260 mm, hand
+# 190 mm, thumb 110 mm) rather than from MeTRAbs output.
+GRIP_OPEN_RATIO = 0.75
+GRIP_CLOSED_RATIO = 0.25
+
+
+def _rot_x(v: Vec, a: float) -> Vec:
+    c, s = math.cos(a), math.sin(a)
+    return (v[0], v[1] * c - v[2] * s, v[1] * s + v[2] * c)
+
+
+def _rot_y(v: Vec, a: float) -> Vec:
+    c, s = math.cos(a), math.sin(a)
+    return (v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c)
+
+
+def _rot_z(v: Vec, a: float) -> Vec:
+    c, s = math.cos(a), math.sin(a)
+    return (v[0] * c - v[1] * s, v[0] * s + v[1] * c, v[2])
+
+
+def _nao_torso(frame: TorsoFrame, v: Vec) -> Vec:
+    """Torso-local vector -> NAO torso axes (+X chest, +Y left, +Z up).
+
+    ``TorsoFrame.forward`` is ``right x up``, which exits the subject's BACK,
+    and ``TorsoFrame.right`` is their anatomical right -- so both invert. The
+    pre-existing shoulder solve does the same thing inline (it passes ``-up``
+    and ``-fwd`` into the decomposition) for exactly this reason.
+    """
+    lat, up, fwd = _to_local(frame, v)
+    return (-fwd, -lat, up)
+
+
+def _elbow_yaw(fore_nao: Vec, shoulder_pitch: float, shoulder_roll: float,
+               elbow_roll: float) -> float | None:
+    """NAO ElbowYaw from the forearm's direction. ``None`` when unobservable.
+
+    Undo the shoulder to put the forearm in the shoulder's own frame, where the
+    remaining chain is just ``Rx(ey).Rz(er)`` acting on ``+X``::
+
+        g = Rx(ey) . Rz(er) . xhat
+          = (cos er,  cos(ey) sin(er),  sin(ey) sin(er))
+
+    so the part of ``g`` off the shoulder's X axis is ``sin(er)`` times
+    ``(cos ey, sin ey)`` and the yaw is a plain ``atan2`` of it -- with the sign
+    of ``sin(er)`` divided out, which matters because NAO's left ElbowRoll is
+    NEGATIVE by convention and would otherwise put every left-arm answer half a
+    turn out.
+
+    The same ``sin(er)`` is the lever arm: as the elbow straightens it vanishes
+    and the forearm lies on the ElbowYaw axis itself, where the joint genuinely
+    cannot be seen. Hence the gate rather than a noisy number.
+    """
+    if abs(math.sin(elbow_roll)) < math.sin(ELBOW_YAW_MIN_BEND):
+        return None
+    g = _rot_z(_rot_y(fore_nao, -shoulder_pitch), -shoulder_roll)
+    sign = -1.0 if elbow_roll < 0.0 else 1.0
+    if math.hypot(g[1], g[2]) < SWING_DEGENERATE:
+        return None
+    return math.atan2(sign * g[2], sign * g[1])
+
+
+def _wrist_yaw(thumb_nao: Vec, shoulder_pitch: float, shoulder_roll: float,
+               elbow_yaw: float, elbow_roll: float) -> float | None:
+    """NAO WristYaw from the direction the thumb points. ``None`` when unseen.
+
+    Undo the whole chain down to the forearm, then read where the thumb landed.
+    The component ALONG the forearm is dropped first: WristYaw rotates about
+    that axis, so it cannot move anything lying on it, and leaving it in would
+    just dilute the part that carries the answer.
+
+    Deliberately measured against a hand-fixed axis and NOT against the elbow's
+    own bend plane, which is the obvious alternative and collapses exactly when
+    the arm is straight -- and the arm is straight a lot. This version keeps
+    working at any elbow angle; it needs only that the thumb is visibly off the
+    forearm's axis.
+    """
+    u = _rot_z(_rot_x(_rot_z(_rot_y(thumb_nao, -shoulder_pitch), -shoulder_roll),
+                      -elbow_yaw), -elbow_roll)
+    span = math.hypot(u[1], u[2])
+    if span < WRIST_YAW_MIN_SPAN:
+        return None
+    return math.atan2(HAND_YAW_SIGN * u[2], HAND_YAW_SIGN * u[1])
+
+
+def _grip(kps: dict[str, Landmark], pre: str, forearm_mm: float) -> float | None:
+    """Hand closure in [0, 1] (0 = open, 1 = fist), or ``None`` if unseen.
+
+    Scale-free by construction: the same gesture reads the same whether the
+    subject is one metre from the camera or four, and a small hand closes over
+    the same range as a large one. See the GRIP_* constants for why the ruler is
+    the forearm rather than the hand.
+    """
+    if not _visible(kps, pre + "thumb", pre + "finger"):
+        return None
+    if forearm_mm < 1e-6:
+        return None
+    ratio = _dist3(kps[pre + "thumb"], kps[pre + "finger"]) / forearm_mm
+    span = GRIP_OPEN_RATIO - GRIP_CLOSED_RATIO
+    if span <= 0.0:
+        return None
+    return _clamp((GRIP_OPEN_RATIO - ratio) / span, 0.0, 1.0)
+
+
 def _dist3(a: Landmark, b: Landmark) -> float:
     return _norm(_sub(a, b))
 
@@ -208,6 +408,48 @@ def _dist3(a: Landmark, b: Landmark) -> float:
 def _lift_fraction(rise: float, leg_length: float, full: float) -> float:
     """Normalize a landmark's rise above the reference into a [0, 1] lift."""
     return _clamp((rise / leg_length - LIFT_DEADBAND) / full, 0.0, 1.0)
+
+
+def _shoulder_angles(lat_outward: float, up: float, fwd: float) -> tuple[float, float]:
+    """Unit upper-arm direction (torso-local) -> NAO (ShoulderPitch, roll-outward).
+
+    The shoulder is NOT solved with :func:`_swing_twist`, and the difference is
+    not cosmetic. NAO's shoulder is ``v = Ry(pitch) . Rz(roll) . xhat`` in torso
+    coordinates (+X out of the chest, +Y left, +Z up), which expands to::
+
+        v_x =  cos(roll) * cos(pitch)      # = -fwd   (TorsoFrame.forward
+        v_y =  sin(roll)                   # = lat_outward    exits the BACK)
+        v_z = -cos(roll) * sin(pitch)      # =  up
+
+    so the roll falls straight out of ONE component -- ``roll = asin(v_y)`` --
+    and is exact at every reachable pose. ``_swing_twist`` instead recovers it as
+    ``acos(v_x / cos(pitch))``, which is the same number algebraically but
+    divides by ``cos(pitch)``, and ``MIN_COS_ROLL`` then reports 0 wherever that
+    divisor gets small.
+
+    For the LEGS that guard costs nothing: there the divisor is ``cos(HipRoll)``
+    and it only collapses with the leg held straight out sideways. For the ARM
+    the divisor is ``cos(ShoulderPitch)``, which collapses for pitch in
+    72.5..107.5 deg -- **an arm hanging at the side**, the single most common
+    pose there is. Measured on the 2026-09-16 session (run_20260916_110404,
+    19441 non-stale frames): the commanded ShoulderRoll was *exactly* 0.000 rad
+    in 31.5% of frames on the left and 43.5% on the right, with a median
+    ShoulderPitch of 80.8 deg sitting right inside the dead band. The robot
+    could not lift an arm sideways from its side at all -- the roll was pinned
+    to zero on the way up and only woke once the arm was already past 72.5 deg.
+    That is the "range of motion is very limited" report.
+
+    ``pitch`` still comes from ``atan2(-up, -fwd)``: dividing both arguments by
+    the common ``cos(roll)`` leaves the ratio alone, and ``cos(roll) > 0`` for
+    every roll inside NAO's own +-76 deg limit. With the arm straight out
+    sideways (``|lat_outward| -> 1``) both arguments vanish together and the
+    pitch is genuinely undefined; ``atan2(0, 0) == 0`` pins it to the identity
+    and lets the roll carry the whole rotation, which is the same reachable
+    choice :func:`_swing_twist` makes for its own degenerate case.
+    """
+    roll_outward = math.asin(_clamp(lat_outward, -1.0, 1.0))
+    pitch = math.atan2(-up, -fwd)
+    return pitch, roll_outward
 
 
 def _swing_twist(a_signed: float, b_ref: float, c_signed: float) -> tuple[float, float]:
@@ -371,11 +613,10 @@ def _arm(kps: dict[str, Landmark], side: str, frame: TorsoFrame) -> dict[str, fl
     # the arms straight down at z = 0, where the fore/aft term is 0 and its sign
     # therefore cannot matter.
     #
-    # Only the pitch changes: _swing_twist's second (roll) output is invariant
-    # under b_ref -> -b_ref, because `first` becomes pi - first, so cos_first and
-    # d negate together and their ratio -- the only thing the roll uses -- is
-    # unchanged. So is |cos_first|, so the MIN_COS_ROLL gate is untouched too.
-    pitch, roll_outward = _swing_twist(-up, -fwd, lat_outward)
+    # Only the pitch is affected by that sign: the roll reads `lat_outward`,
+    # which the fore/aft axis does not enter at all. See _shoulder_angles for
+    # why the shoulder does NOT go through _swing_twist like the legs do.
+    pitch, roll_outward = _shoulder_angles(lat_outward, up, fwd)
 
     out: dict[str, float] = {}
     if side == "L":
@@ -387,13 +628,76 @@ def _arm(kps: dict[str, Landmark], side: str, frame: TorsoFrame) -> dict[str, fl
 
     # Elbow flexion: angle between upper arm and forearm (0 = straight). Pure
     # dot-product angle -- exact regardless of coordinate frame.
-    if _visible(kps, pre + "wrist"):
-        w = kps[pre + "wrist"]
-        bend = _angle_between(_sub(e, s), _sub(w, e))
-        if side == "L":
-            out["LElbowRoll"] = -bend          # NAO L elbow bends negative
-        else:
-            out["RElbowRoll"] = +bend          # NAO R elbow bends positive
+    if not _visible(kps, pre + "wrist"):
+        return out
+    w = kps[pre + "wrist"]
+    bend = _elbow_bend_to_nao(_angle_between(_sub(e, s), _sub(w, e)))
+    if side == "L":
+        elbow_roll = -bend                    # NAO L elbow bends negative
+    else:
+        elbow_roll = +bend                    # NAO R elbow bends positive
+    out[f"{side}ElbowRoll"] = elbow_roll
+
+    out.update(_hand(kps, side, frame, pitch, roll_outward, elbow_roll, e, w))
+    return out
+
+
+def _hand(kps: dict[str, Landmark], side: str, frame: TorsoFrame,
+          pitch: float, roll_outward: float, elbow_roll: float,
+          elbow: Landmark, wrist: Landmark) -> dict[str, float]:
+    """The two roll joints and the grip, from the hand markers.
+
+    Returns only what is actually observable this frame. Everything here is
+    omitted rather than guessed when the geometry does not support it, so the
+    driver holds the previous value instead of snapping a wrist to zero -- the
+    same contract the rest of this module keeps for an invisible limb.
+
+    ``ElbowYaw`` needs no hand landmarks at all -- the forearm's own direction
+    fixes it once the shoulder and the elbow bend are known -- so it is solved
+    under plain ``coco_19`` too. ``WristYaw`` and the grip DO need the hand
+    markers, and those exist only under ``pose.skeleton: ""`` (MeTRAbs'
+    122-joint superset).
+    """
+    pre = "left_" if side == "L" else "right_"
+    out: dict[str, float] = {}
+
+    fore_vec = _sub(wrist, elbow)
+    grip = _grip(kps, pre, _norm(fore_vec))
+    if grip is not None:
+        out[f"{side}Hand"] = grip
+
+    # The three outputs have three different evidence requirements, so they are
+    # gated separately rather than behind one "is the hand visible" check.
+    # ElbowYaw needs only the forearm, which the caller has already confirmed;
+    # WristYaw additionally needs the thumb; the grip needs thumb and finger. An
+    # earlier version gated all of them on the thumb, which threw away a
+    # perfectly observable ElbowYaw whenever one marker dropped out.
+    fore = _normalize(fore_vec)
+    if fore is None:
+        return out
+
+    # NAO's ShoulderRoll sign is per-side but the kinematic chain is not: the
+    # chain in balance.py is the same Ry.Rz.Rx.Rz.Rx on both arms, so the solve
+    # below wants the angle as the JOINT carries it, not the outward-positive
+    # convention the shoulder solve reports in.
+    shoulder_roll = roll_outward if side == "L" else -roll_outward
+
+    elbow_yaw = _elbow_yaw(_nao_torso(frame, fore), pitch, shoulder_roll, elbow_roll)
+    if elbow_yaw is None:
+        # WristYaw is solved IN the forearm frame, which is not known without
+        # the elbow yaw, so it goes too.
+        return out
+    out[f"{side}ElbowYaw"] = elbow_yaw
+
+    if not _visible(kps, pre + "hand_root", pre + "thumb"):
+        return out
+    thumb = _normalize(_sub(kps[pre + "thumb"], kps[pre + "hand_root"]))
+    if thumb is None:
+        return out
+    wrist_yaw = _wrist_yaw(_nao_torso(frame, thumb), pitch, shoulder_roll,
+                           elbow_yaw, elbow_roll)
+    if wrist_yaw is not None:
+        out[f"{side}WristYaw"] = wrist_yaw
     return out
 
 
@@ -936,6 +1240,9 @@ def retargetable_joints(drive_legs: bool = False, drive_head: bool = True) -> li
         "LShoulderPitch", "RShoulderPitch",
         "LShoulderRoll", "RShoulderRoll",
         "LElbowRoll", "RElbowRoll",
+        "LElbowYaw", "RElbowYaw",
+        "LWristYaw", "RWristYaw",
+        "LHand", "RHand",
     ]
     if drive_head:
         joints += ["HeadYaw", "HeadPitch"]

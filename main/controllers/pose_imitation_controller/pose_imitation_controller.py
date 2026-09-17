@@ -79,7 +79,15 @@ from walk_motion import (  # noqa: E402
     motion_pose_at,
     motion_poses,
     plan_action,
+    TURN_ACTIONS,
     select_walk_clip,
+    turn_schedule,
+)
+
+# Every logical action that rotates the robot, flattened out of the direction
+# table so "is this a turn?" is one membership test.
+TURN_ACTION_NAMES = frozenset(
+    action for actions in TURN_ACTIONS.values() for action in actions
 )
 
 # ===========================================================================
@@ -112,9 +120,40 @@ LEG_CONTROL = "auto"
 
 DRIVE_HEAD = True         # head yaw/pitch follow the human head
 SWAP_SIDES = False        # True = mirror-image mapping (robot's left <-> your right)
-SMOOTHING_ALPHA = 0.4     # EMA factor for arm/head targets (0..1, higher = snappier)
+SMOOTHING_ALPHA = 0.4     # EMA factor for HEAD targets (0..1, higher = snappier)
 VELOCITY_SCALE = 0.5      # fraction of each joint's hardware max velocity
 LEG_VELOCITY_FACTOR = 0.5 # extra slow-down on leg joints when merely posturing
+
+# --- Arm tracking (see pose_control_utils.ArmTracker) -----------------------
+# The arms are NOT smoothed by SMOOTHING_ALPHA. That EMA was stepped once per
+# camera frame, so its delay was whatever the frame rate happened to be --
+# measured at 127 ms of the 180 ms between the pose log and the command on the
+# 2026-09-16 session, and it would have doubled silently had the camera slowed.
+# These two are in seconds instead, so the response is the same at any frame
+# rate, and they are tuned as a pair: TAU buys smoothness, LEAD gives the delay
+# back. Retune with scripts/tune_arm_tracking.py against a recorded session.
+# Measured by scripts/tune_arm_tracking.py over run_20260916_110404 (5473
+# frames, 411 s, gap-aware), against the linearly-interpolated retarget target.
+# This pair is not a trade-off against the old EMA -- it is better on every
+# axis. Mean over the eight solved arm joints:
+#
+#   EMA alpha=0.4 (old)   lag 108 ms   jitter 1.00x   err rms 5.50d   p99 20.29d
+#   tau=0.07 lead=0.00    lag  80 ms   jitter 0.39x   err rms 4.65d   p99 13.58d
+#   tau=0.07 lead=0.20    lag  38 ms   jitter 0.56x   err rms 5.21d   p99 15.32d
+#   tau=0.07 lead=0.32    lag  32 ms   jitter 0.63x   err rms 5.93d   p99 17.54d
+#
+# LEAD is where the lag actually goes: 0 leaves 80 ms on the table. 0.32 buys
+# only 6 ms more than 0.20 while costing more error than the EMA it replaced on
+# both measures, because past that the prediction overshoots every direction
+# reversal. 0.20 is the fast end of the range that still tracks more accurately
+# than what it replaced.
+#
+# Note the jitter column is below 1.00x even at LEAD=0: that part is not the
+# prediction at all, it is `tick_arms` filling in between camera frames instead
+# of holding. The old command moved in ~12 steps a second.
+ARM_TAU_S = 0.07          # smoothing time constant (was ~0.17 s, frame-rate-set)
+ARM_LEAD_S = 0.20         # velocity extrapolation: cancels the residual delay
+ARM_VELOCITY_FACTOR = 1.8 # multiplies VELOCITY_SCALE; product capped at hardware max
 STALE_AFTER_S = 0.5       # hold pose if no command for this long
 
 # --- Fall recovery ---------------------------------------------------------
@@ -434,6 +473,13 @@ HEADING_FROM_IMU = False        # kept: the IMU's yaw is unusable, see HEADING_S
 # it has not arrived by then a joint is blocked or fighting something, and
 # locomotion counts a failure rather than stalling forever.
 CLIP_PREPARE_TIMEOUT_S = 2.5
+# Ceiling on how long the legs may be held in a prepare ramp in TOTAL,
+# across any number of changes of planned action. CLIP_PREPARE_TIMEOUT_S is
+# per-action and _prepare_since restarts on every flip, so a planner that
+# alternates forward/turn_left rewinds it forever: one measured episode
+# ramped for 9.50 s, played nothing, and fell. Slightly above 2.5 s so a
+# single honest retry on a second action is still allowed.
+CLIP_PREPARE_RUN_TIMEOUT_S = 3.5
 
 # --- Stopping a clip early -------------------------------------------------
 # A clip used to be played to completion, on the sound reasoning that a clip
@@ -512,7 +558,21 @@ GAIT_CYCLE = True
 # is bounded, because the moment the latch expires the clip leaves the gait
 # cycle (or, for a non-cyclic clip, exits at its next safe keyframe) rather than
 # running to its end.
-WALK_LATCH_RELEASE_S = 1.2
+#
+# Lowered 1.2 -> 0.6 on 2026-09-10. Two measurements from the 2026-09-08 session
+# (238 s, log 1788865278) forced it:
+#   * of the 34 gaps between marching bouts, only 13 were shorter than 1.2 s --
+#     the real cue dropouts this latch exists to bridge -- and they totalled
+#     7.26 s, a mean of 0.56 s each. The other 21 were genuine stops. So the
+#     1.2 s setting was spending 21 x 1.2 = 25.2 s of trailing walk to buy
+#     7.26 s of bridging, and that trailing walk IS the "robot keeps walking
+#     after I stop" complaint.
+#   * the dropouts themselves are now rarer: GaitCueExtractor no longer discards
+#     its cadence evidence on a single low-confidence frame
+#     (walk.cue_conf_grace_frames), which is what produced most of the
+#     sub-second ones.
+# 0.6 s still covers the mean dropout while halving the overshoot to 4 cm.
+WALK_LATCH_RELEASE_S = 0.6
 
 # --- Balance ---------------------------------------------------------------
 # Model-based CoM feedback recovers the depth/balance information a 2D camera
@@ -640,7 +700,7 @@ DIAGNOSTIC_COLUMNS = (
     "cop_share_l",
     "support_margin_x", "support_margin_y", "head_height", "reloads",
     "clip_planned", "clip_status", "clips_available", "clip_time", "walk_latched",
-    "early_exits", "yaw_stable",
+    "early_exits", "tails_trimmed", "yaw_stable",
     # Cyclic gait (GAIT_CYCLE): how many strides this walk has repeated without
     # restarting the clip, the phase within the cycle, and what cycle_tick did.
     # A walk that is working shows clip_cycles climbing while clip_phase saws
@@ -650,6 +710,14 @@ DIAGNOSTIC_COLUMNS = (
     "yaw_error", "yaw_latched",
     "fsr_l", "fsr_r",
     "gait_state", "gait_cadence", "gait_conf", "body_yaw", "gait_cue_channel",
+    # What the ACTION classifier said the human was doing, and the measurements
+    # behind it. Logged next to clip_planned/clip_status so one row answers the
+    # whole question: the human did X, we decided Y, we played Z, this long
+    # after. Without these the decision can only be inferred from its
+    # consequences, which is how the old cue's 18.8% of false march went
+    # unnoticed for four sessions.
+    "act_action", "act_conf", "act_forward_mps", "act_lateral_mps",
+    "act_yaw_rate", "act_crouch", "act_lift", "act_observed", "act_reason",
 )
 
 logging.basicConfig(
@@ -700,6 +768,9 @@ class MotionPlayer:
         self._first_pose: dict[str, dict[str, float]] = {}
         self._safe_exits: dict[str, list[float]] = {}
         self._cycles: dict[str, object] = {}
+        self._turns: dict[str, object] = {}
+        # Cleared whenever a clip is dropped; see the `interruptible` property.
+        self._interruptible: frozenset[str] | None = None
         self._entry_pose: dict[str, dict[str, float]] = {}
         self._log = log or (lambda *_a, **_k: None)
         self.action: str | None = None
@@ -869,6 +940,69 @@ class MotionPlayer:
             return False
         return any(abs(now - t) <= tolerance for t in exits)
 
+    @property
+    def interruptible(self) -> frozenset[str]:
+        """Actions whose clips can be stopped part-way, at a point WE choose.
+
+        Handed to :func:`walk_motion.plan_action`, which plans turning very
+        differently for these (see ``_pick_turn``). Derived from the clips
+        themselves rather than declared, so a Webots release whose clip does not
+        come to rest, or a machine with no NumPy and therefore no CoM model, is
+        *detected* as un-stoppable and falls back to whole-clip playback instead
+        of being stopped somewhere nobody certified.
+
+        A TURN clip has to clear a higher bar than the rest: a schedule, not just
+        somewhere safe to stop. The difference is the whole safety argument.
+        Dropping the overshoot floor for a turn is only sound because the clip is
+        then AIMED -- stopped at the rung that best serves the heading error. A
+        clip with safe keyframes but no measurable rotation gives the caller
+        nowhere to aim, so it would get the loosened gate and none of the
+        aiming, and the loop would hunt below the finest error the clip can serve
+        (a 60 deg clip asked for 17 deg turns to -43 deg, and asks again).
+        """
+        if self._interruptible is None:
+            self._interruptible = frozenset(
+                action for action in self._files
+                if (self.turn(action) is not None
+                    if action in TURN_ACTION_NAMES
+                    else bool(self.safe_exits(action)))
+            )
+        return self._interruptible
+
+    def turn(self, action: str | None = None):
+        """The :class:`walk_motion.TurnSchedule` for ``action``, or None.
+
+        Cached per clip: the schedule costs a forward-kinematics pass over every
+        keyframe, which is far too slow to repeat per control step. The safe-exit
+        list it needs is the one already cached for this clip, so asking for the
+        schedule does not recompute it.
+        """
+        target = action or self.action
+        if target is None:
+            return None
+        if target not in self._turns:
+            found = None
+            path = self._files.get(target)
+            if path is not None:
+                try:
+                    found = turn_schedule(path, self.safe_exits(target))
+                except Exception as exc:  # noqa: BLE001
+                    self._log("No turn schedule for '%s' (%s); it will be played "
+                              "whole.", target, exc)
+                    found = None
+                if found is not None:
+                    self._log(
+                        "Clip '%s' turns %+.0f deg in %.2fs: enter at %.2fs "
+                        "(skipping its opening crouch), then %d certified places "
+                        "to stop, %.1f deg/s sustained, worst gap between "
+                        "deliverable angles %.0f deg.",
+                        target, math.degrees(found.total_rad), found.duration_s,
+                        found.entry_s, len(found.rungs),
+                        math.degrees(found.rate_rad_s),
+                        math.degrees(found.quantum_rad))
+            self._turns[target] = found
+        return self._turns[target]
+
     def cycle(self, action: str | None = None):
         """The :class:`walk_motion.GaitCycle` for ``action``, or None.
 
@@ -927,24 +1061,44 @@ class MotionPlayer:
     def entry_pose(self, action: str | None = None) -> dict[str, float]:
         """The pose to ramp the legs to before playing ``action``.
 
-        The clip's first keyframe normally, but the pose at ``enter_s`` for a
-        cyclic clip, whose opening squat is skipped.
+        The clip's first keyframe normally, but the pose at the entry time for a
+        clip whose opening crouch is skipped -- see :meth:`entry_time_s`.
         """
         target = action or self.action
         if target is None:
             return {}
-        cycle = self.cycle(target)
-        if cycle is None or cycle.enter_s <= 0.0:
+        entry = self.entry_time_s(target)
+        if entry <= 0.0:
             return self.first_pose(target)
         if target not in self._entry_pose:
             self._entry_pose[target] = motion_pose_at(
-                self._files.get(target), cycle.enter_s)
+                self._files.get(target), entry)
         return dict(self._entry_pose[target])
 
     def entry_time_s(self, action: str | None = None) -> float:
-        """Where playback of ``action`` should start, in seconds."""
-        cycle = self.cycle(action)
-        return 0.0 if cycle is None else float(cycle.enter_s)
+        """Where playback of ``action`` should start, in seconds.
+
+        Every one of Cyberbotics' locomotion clips opens with the same thing: a
+        slow squat from the standing pose into the deep, sole-flat crouch it
+        walks or turns in. That is a full second and more of clip during which
+        the robot goes nowhere -- and the controller's own prepare-ramp has to
+        put the legs in that crouch anyway before handing the clip over, because
+        playback commands its first keyframe on its very first step with the
+        velocity caps already lifted (see ``approach_leg_pose``).
+
+        So the crouch is done once, by the ramp, rate-limited and under balance
+        supervision, and playback starts after it. Measured: 1.38 s skipped on
+        Forwards50.motion and 1.20 s on the turn clips, off the front of every
+        walk and every turn.
+        """
+        target = action or self.action
+        if target is None:
+            return 0.0
+        cycle = self.cycle(target)
+        if cycle is not None:
+            return float(cycle.enter_s)
+        turn = self.turn(target)
+        return 0.0 if turn is None else float(turn.entry_s)
 
     def cycle_tick(self, hold: bool) -> str:
         """Advance cyclic playback one control step. Returns a status word.
@@ -1093,6 +1247,7 @@ class MotionPlayer:
             self._first_pose.clear()
             self._safe_exits.clear()
             self._cycles.clear()
+            self._turns.clear()
             self._entry_pose.clear()
         else:
             self._files.pop(target, None)
@@ -1101,7 +1256,9 @@ class MotionPlayer:
             self._first_pose.pop(target, None)
             self._safe_exits.pop(target, None)
             self._cycles.pop(target, None)
+            self._turns.pop(target, None)
             self._entry_pose.pop(target, None)
+        self._interruptible = None
 
     def abort(self) -> None:
         """Stop mid-clip. Only for a safety abort -- see the class docstring."""
@@ -1155,6 +1312,9 @@ class PoseImitationController:
             swap_sides=SWAP_SIDES,
             smoothing_alpha=SMOOTHING_ALPHA,
             velocity_scale=VELOCITY_SCALE,
+            arm_tau_s=ARM_TAU_S,
+            arm_lead_s=ARM_LEAD_S,
+            arm_velocity_factor=ARM_VELOCITY_FACTOR,
             leg_velocity_factor=LEG_VELOCITY_FACTOR,
             stale_after_s=STALE_AFTER_S,
             enable_balance=ENABLE_BALANCE,
@@ -1178,6 +1338,7 @@ class PoseImitationController:
             )
 
         self.gait_cmd: dict | None = None
+        self.action_cmd: dict | None = None
         self.leg_mode = "stand"
         self.frame_count = 0
         self._last_log_time = time.time()
@@ -1229,6 +1390,9 @@ class PoseImitationController:
         # Ramp-to-clip-stance state (see CLIP_PREPARE_TIMEOUT_S).
         self._preparing: str | None = None
         self._prepare_since: float | None = None
+        # Total time spent continuously ramping toward SOME clip stance,
+        # immune to the planner changing its mind (see _prepare_for).
+        self._prepare_run_since: float | None = None
         # Latched walk request (see WALK_LATCH_RELEASE_S): the last gait command
         # that asked for locomotion, and when the latch on it expires.
         self._walk_gait: dict | None = None
@@ -1237,6 +1401,12 @@ class PoseImitationController:
         # to their end. Counted because "the robot stops promptly now" is exactly
         # the kind of claim that should be measurable after the fact.
         self._early_exits = 0
+        # Clips whose closing stand-up was skipped because the settle had already
+        # finished (see GaitCycle.rest_s). Counted separately from _early_exits:
+        # an early exit cuts a clip short of what it was doing, whereas this one
+        # let it finish and only declined to wait for the part that does nothing.
+        # Conflating them would make "the walk was interrupted" unreadable.
+        self._tails_trimmed = 0
         self._cycles_walked = 0
         self._cycle_state = ""
         self._report_startup()
@@ -1952,6 +2122,25 @@ class PoseImitationController:
         if files:
             logger.info("Locomotion clips found: %s", ", ".join(sorted(files)))
             logger.info("Walk clip: %s", note)
+            # Say how the robot will TURN, in the same breath as how it will
+            # walk. Turning is the half of locomotion with no equivalent of
+            # `note`, and "which clip, entered where, stoppable at which angles"
+            # is exactly what has to be known to read a turn that went wrong.
+            # Computing the schedules here also front-loads their cost (one
+            # forward-kinematics pass per keyframe) into startup instead of
+            # paying it on the first control step that wants to turn.
+            aimable = sorted(self.motion.interruptible & TURN_ACTION_NAMES)
+            if aimable:
+                logger.info(
+                    "Turning: %s can be aimed -- entered after the opening "
+                    "crouch and stopped at the certified keyframe nearest the "
+                    "heading error, instead of played whole.",
+                    ", ".join(aimable))
+            else:
+                logger.info(
+                    "Turning: no clip can be aimed (no rotation measurable in "
+                    "the keyframes, or no CoM model). Turns will be played "
+                    "whole, so the heading will settle within half a clip.")
         else:
             logger.warning(
                 "No NAO .motion files found (searched %d dirs, e.g. %s). The robot "
@@ -2104,7 +2293,8 @@ class PoseImitationController:
                 logger.error(
                     "Motion '%s' overran its watchdog (%.1fs); taking the body "
                     "back. This clip will not be used again.",
-                    action, now - (self._motion_started_at or now),
+                    action, now - (self._motion_started_at
+                                   if self._motion_started_at is not None else now),
                 )
                 self.motion.drop(action)
                 self._end_motion(action, ok=False, reason="watchdog")
@@ -2135,10 +2325,48 @@ class PoseImitationController:
                         # because a stride completed while the walk is looking
                         # for its exit is still a stride and still proof of life.
                         self._extend_motion_deadline(now)
+                    # The settle is over: the clip has stopped travelling and
+                    # everything left is it standing up out of its own walk
+                    # crouch, which the lower-body layer does better and has to
+                    # redo anyway. Riding it out is 1.28 s of a robot that will
+                    # not answer the human -- on every stop, and again before it
+                    # can be asked to walk a second time. See GaitCycle.rest_s.
+                    if self.motion.leaving:
+                        cycle = self.motion.cycle()
+                        played = self.motion.time_s()
+                        # Only when there is something to trim. A clip whose tail
+                        # IS the settle (rest_s == duration_s) must be ridden to
+                        # the end, and firing here on its last keyframe would
+                        # steal the ordinary "clip finished" path for no gain.
+                        if (cycle is not None and played is not None
+                                and cycle.duration_s - cycle.rest_s
+                                > CLIP_EXIT_TOLERANCE_S
+                                and played >= cycle.rest_s):
+                            logger.info(
+                                "'%s' has come to rest at %.2fs; taking the legs "
+                                "back rather than riding out the last %.2fs of "
+                                "the clip standing itself up.",
+                                action, played, cycle.duration_s - played)
+                            self._tails_trimmed += 1
+                            self._end_motion(action, ok=True,
+                                             reason="settled, tail trimmed")
+                            self._clip_status = "stopped, settled"
+                            return
                     self._clip_status = f"cycling ({self._cycle_state})"
                     self.leg_mode = f"motion:{action}"
                     return
-                if not wanted and self.motion.at_safe_exit(CLIP_EXIT_TOLERANCE_S):
+                if self._turning and self._turn_exit_due(yaw):
+                    logger.info(
+                        "Turn '%s' has delivered the heading (%.2fs of %.2fs, "
+                        "%.0f deg still wanted); stopping here.", action,
+                        self.motion.time_s() or 0.0,
+                        self.motion.duration_s() or 0.0,
+                        math.degrees(self.yaw_servo.error(yaw)))
+                    self._early_exits += 1
+                    self._turning = False
+                    self._end_motion(action, ok=True, reason="turn aimed home")
+                    self._clip_status = "turn complete"
+                elif not wanted and self.motion.at_safe_exit(CLIP_EXIT_TOLERANCE_S):
                     logger.info(
                         "Nothing wants locomotion any more: stopping '%s' at a "
                         "safe keyframe (%.2fs of %.2fs).", action,
@@ -2179,10 +2407,13 @@ class PoseImitationController:
             plan = plan_action(
                 yaw_error_rad=self.yaw_servo.error(yaw) if has_heading else 0.0,
                 gait=locomotion_gait,
+                action=self.action_cmd,
                 available=self.motion.available,
                 params=LOCOMOTION,
                 turning=self._turning,
                 yaw_trustworthy=has_heading and self.yaw_servo.stable(),
+                interruptible=self.motion.interruptible,
+                playing=self.motion.action,
             )
             self._clip_planned = plan.action or ""
             if plan.action is None:
@@ -2222,6 +2453,7 @@ class PoseImitationController:
                 self._clip_status = "started"
                 self._preparing = None
                 self._prepare_since = None
+                self._prepare_run_since = None
                 return
             else:
                 # The clip was planned but Webots would not play it. Silence here
@@ -2277,6 +2509,45 @@ class PoseImitationController:
         self.leg_mode = "stand"
         self.driver.balance_tick(torso_rp, tilt_rate=tilt_rate, now_s=now)
 
+    def _turn_exit_due(self, yaw: float) -> bool:
+        """Has the turn clip now delivered the rotation the heading asked for?
+
+        This is what turns one coarse clip into an aimed turn. The clip knows how
+        far it has rotated the robot at every certified stopping point
+        (:class:`walk_motion.TurnSchedule`); the servo knows how much rotation is
+        still wanted. So each step we ask which of the stopping points STILL
+        AHEAD would leave the smallest heading error, and stop when the answer is
+        "this one, now".
+
+        Aiming rather than merely stopping when the error clears the deadband
+        matters because the stopping points are up to 16 deg apart: a reactive
+        "stop as soon as I am close enough" overshoots by however far the next
+        one happens to be, whereas choosing the nearest rung to the error bounds
+        the residual at half that gap -- 8 deg, against the 20 deg that playing
+        even the small clip whole leaves behind.
+
+        Re-evaluated every control step on the LIVE error, so a human who keeps
+        turning simply moves the target rung further out and the robot keeps
+        turning with them, in the same clip, with no restart.
+
+        False whenever the heading is unusable or the clip has no schedule; the
+        ordinary "the planner wants something else" exit then applies as before.
+        """
+        if not self.heading_available:
+            return False
+        schedule = self.motion.turn()
+        now = self.motion.time_s()
+        if schedule is None or now is None:
+            return False
+        delivered = schedule.yaw_at(now)
+        error = self.yaw_servo.error(yaw)
+        ahead = [rung for rung in schedule.rungs
+                 if rung[0] >= now - CLIP_EXIT_TOLERANCE_S]
+        if not ahead:
+            return True            # the clip has no certified stop left; take it
+        best = min(ahead, key=lambda rung: abs((rung[1] - delivered) - error))
+        return best[0] <= now + CLIP_EXIT_TOLERANCE_S
+
     def _wanted_action(self, gait: dict | None, yaw: float) -> str | None:
         """What the locomotion layer would ask for right now, or None to stand.
 
@@ -2286,10 +2557,13 @@ class PoseImitationController:
         return plan_action(
             yaw_error_rad=self.yaw_servo.error(yaw) if self.heading_available else 0.0,
             gait=gait,
+            action=self.action_cmd,
             available=self.motion.available,
             params=LOCOMOTION,
             turning=self._turning,
             yaw_trustworthy=self.heading_available and self.yaw_servo.stable(),
+            interruptible=self.motion.interruptible,
+            playing=self.motion.action,
         ).action
 
     def _clip_unwanted(self, gait: dict | None, roll: float, pitch: float,
@@ -2340,7 +2614,20 @@ class PoseImitationController:
         if not pose:
             return True
         if self._preparing != action:
+            # Restart the per-ACTION clock, but NOT the clock that bounds how
+            # long the legs may be held in a ramp overall. _prepare_since used
+            # to be reset here too, which handed CLIP_PREPARE_TIMEOUT_S a clock
+            # that a dithering planner could rewind forever: measured on the
+            # 2026-09-08 session, one episode sat in prepare for 9.50 s -- 480
+            # ticks, zero clips played, 6 flips between prepare:forward and
+            # prepare:turn_left -- while the longest stretch on any SINGLE
+            # action was 2.67 s, so the 2.5 s timeout never once fired. The legs
+            # stood in a one-footed ramp for 9.5 s and the episode ended in a
+            # fall. The run clock below is only cleared by _abandon_prepare or
+            # by actually reaching the stance.
             self._preparing = action
+            if self._prepare_run_since is None:
+                self._prepare_run_since = now
             self._prepare_since = now
             self.driver.release_leg_pose()
             logger.info("Preparing to %s: ramping the legs into the stance the "
@@ -2349,13 +2636,25 @@ class PoseImitationController:
                         self.motion.entry_time_s(action))
         if self.driver.approach_leg_pose(pose, now):
             self._clip_status = "ready (in the clip's stance)"
+            self._prepare_run_since = None
             return True
-        waited = now - (self._prepare_since or now)
-        if waited >= CLIP_PREPARE_TIMEOUT_S:
+        # ``x or now`` would be wrong here: these are TIMES, and 0.0 is falsy, so
+        # a clock legitimately stamped at t=0 read as "unset" and the elapsed
+        # time collapsed to zero -- disabling the timeout entirely. That is not
+        # hypothetical: simulationReset() zeroes robot.getTime(), and this
+        # controller resets on every fall (AUTO_RELOAD_ON_FALL), so the first
+        # prepare after any fall had no timeout at all.
+        waited = now - (self._prepare_since if self._prepare_since is not None else now)
+        # Bound BOTH clocks: the per-action one (this clip is not reachable) and
+        # the run one (we have been ramping the legs for too long in total, no
+        # matter how many times the planner changed its mind).
+        ramping_for = now - (
+            self._prepare_run_since if self._prepare_run_since is not None else now)
+        if waited >= CLIP_PREPARE_TIMEOUT_S or ramping_for >= CLIP_PREPARE_RUN_TIMEOUT_S:
             logger.warning(
-                "Could not reach %s's opening stance in %.1fs; a leg joint is "
-                "blocked or fighting another layer. Abandoning this clip.",
-                action, waited)
+                "Could not reach %s's opening stance (%.1fs on this action, "
+                "%.1fs ramping in total); a leg joint is blocked or the planner "
+                "is dithering. Abandoning this clip.", action, waited, ramping_for)
             self._abandon_prepare()
             self._end_motion(action, ok=False, reason="could not reach the stance")
             return False
@@ -2368,6 +2667,7 @@ class PoseImitationController:
             return
         self._preparing = None
         self._prepare_since = None
+        self._prepare_run_since = None
         self.driver.release_leg_pose()
         if self.driver.lower_body is not None:
             # The legs are wherever the ramp left them; let the crouch come back
@@ -2494,6 +2794,7 @@ class PoseImitationController:
         d_roll, d_pitch = self._tilt_rate()
         m = self.driver.lower_body_meta
         gait = self.gait_cmd or {}
+        action = self.action_cmd or {}
         fsr = self._read_fsr() or {}
         raw_roll, raw_pitch, _ = self._imu_rpy()
         zero = self._imu_zero
@@ -2548,6 +2849,7 @@ class PoseImitationController:
             "clip_time": self.motion.time_s(),
             "walk_latched": int(self._walk_latch_until is not None),
             "early_exits": self._early_exits,
+            "tails_trimmed": self._tails_trimmed,
             "clip_cycles": self._cycles_walked,
             "clip_phase": self._clip_phase(),
             "cycle_state": self._cycle_state,
@@ -2555,6 +2857,15 @@ class PoseImitationController:
             "yaw_error": self.yaw_servo.error(yaw),
             "yaw_latched": int(bool(self.yaw_servo.latched)),
             "fsr_l": fsr.get("L"), "fsr_r": fsr.get("R"),
+            "act_action": action.get("action"),
+            "act_conf": action.get("conf"),
+            "act_forward_mps": action.get("forward_mps"),
+            "act_lateral_mps": action.get("lateral_mps"),
+            "act_yaw_rate": action.get("yaw_rate_dps"),
+            "act_crouch": action.get("crouch"),
+            "act_lift": action.get("lift"),
+            "act_observed": action.get("observed"),
+            "act_reason": action.get("reason"),
             "gait_state": gait.get("state"),
             "gait_cadence": gait.get("cadence_hz"),
             "gait_conf": gait.get("conf"),
@@ -2674,6 +2985,10 @@ class PoseImitationController:
                 if angles:
                     self.driver.update(angles, now_s=now)
             self.gait_cmd = command.get("gait")
+            # What the human is DOING, as opposed to the rhythm of a proxy
+            # signal. See src/perception/action_cues.py; plan_action prefers it
+            # over the gait cue when it has an opinion.
+            self.action_cmd = command.get("action")
             self.driver.set_gait_command(self.gait_cmd)
         elif self.driver.check_stale(now):
             # Tracking lost: tell every layer to stand down. They ramp back to
@@ -2683,6 +2998,7 @@ class PoseImitationController:
             # an expiry it would hold a one-legged stance long after the human
             # walked away.
             self.gait_cmd = None
+            self.action_cmd = None
             self.driver.set_gait_command(None)
             self.driver.lower_body_stand_down()
             # The arms and head need telling too, or they hold the departed
@@ -2691,6 +3007,11 @@ class PoseImitationController:
             # A human who has walked out of frame is not walking, whatever the
             # last cue said. Without this the latch would keep the robot going.
             self._drop_walk_latch()
+
+        # Advance the arms every step, not only on the steps that carried a
+        # camera frame: the camera runs at ~12 Hz against the simulation's 50,
+        # so the arm used to hold for four steps and jump on the fifth.
+        self.driver.tick_arms(now)
 
         self.driver.read_feedback()
         raw_roll, raw_pitch, yaw = self._imu_rpy()
