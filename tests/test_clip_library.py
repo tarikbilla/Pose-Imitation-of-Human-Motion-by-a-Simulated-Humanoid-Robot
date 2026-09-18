@@ -352,12 +352,29 @@ def test_an_unseen_human_stands_rather_than_falling_through() -> None:
     assert plan.action is None, plan.reason
 
 
-def test_a_still_human_stands_even_with_a_warm_gait_cue() -> None:
+def test_a_still_human_stands_and_a_marching_one_walks() -> None:
+    """``idle`` means the PELVIS is still, not the human.
+
+    This used to assert that an idle verdict stands even against a marching
+    gait cue, on the theory that the gait cue's warm evidence was the less
+    trustworthy witness. The 2026-09-17 session showed the opposite failure:
+    the action cue's walk witnesses are absolute speeds fitted to a faster
+    walker, so a subject marching in place or walking at 0.07-0.10 m/s read as
+    idle for 75% of 59 s of visible marching -- and "stand" handed the legs to
+    per-joint pose imitation of a walking human, which is what fell over. Both
+    cues are witnesses to one question now: the pelvis travels, or the legs
+    cycle. A human who has LEFT the frame is still stopped by 'unknown' (see the
+    test above); a human standing with still legs is still stopped here.
+    """
     from walk_motion import plan_action
-    warm_gait = {"state": "march", "cadence_hz": 1.0, "conf": 1.0}
+    still_legs = {"state": "idle", "cadence_hz": 0.0, "conf": 1.0}
     plan = plan_action(yaw_error_rad=0.0, available=ALL_CLIPS,
-                       action={"action": "idle", "conf": 1.0}, gait=warm_gait)
+                       action={"action": "idle", "conf": 1.0}, gait=still_legs)
     assert plan.action is None, plan.reason
+    marching = {"state": "march", "cadence_hz": 1.0, "conf": 1.0}
+    plan = plan_action(yaw_error_rad=0.0, available=ALL_CLIPS,
+                       action={"action": "idle", "conf": 1.0}, gait=marching)
+    assert plan.action == "forward", plan.reason
 
 
 def test_a_low_confidence_verdict_is_not_acted_on() -> None:

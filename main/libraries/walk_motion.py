@@ -728,6 +728,12 @@ class LocomotionParams:
     # the gate is already calibrated to fire on 0.0% of provably-stationary
     # frames -- so this is a second, softer filter rather than the safety one.
     action_conf_min: float = 0.35
+    # A human whose legs are cycling but whose pelvis is barely travelling is
+    # walking forward unless the pelvis is clearly drifting BACKWARD. This is
+    # the drift, along the body's own forward axis, past which a march is
+    # answered with the backward clip. Well above the ~0.02 m/s a standing
+    # subject reads, well below the 0.12 m/s walk gate.
+    march_backward_mps: float = 0.04
 
 
 @dataclass(frozen=True)
@@ -933,19 +939,45 @@ def plan_action(
     # proxy signal. On the 2026-09-16 session that difference measured as a stop
     # latency of 165 ms against the gait cue's recorded 1218 ms, and false
     # walking of 1.7% of the session against 18.8%.
+    #
+    # But its walk witnesses are ABSOLUTE speeds, and a subject who walks or
+    # marches more slowly than the one they were fitted to reads as idle. The
+    # two cues are therefore used as two witnesses to one question -- either the
+    # pelvis travels, or the legs cycle -- and the action verdicts that a
+    # cycling pair of legs contradicts yield to the march. See _plan_from_action.
+    marching = _confident_march(gait, p)
     if action:
-        plan = _plan_from_action(action, available, p)
+        plan = _plan_from_action(action, available, p, marching=marching)
         if plan is not None:
             return plan
 
-    if gait and "forward" in available:
-        marching = str(gait.get("state", "idle")) == "march"
+    if marching:
         cadence = float(gait.get("cadence_hz", 0.0) or 0.0)
-        conf = float(gait.get("conf", 0.0) or 0.0)
-        if marching and cadence >= p.walk_cadence_min_hz and conf >= p.walk_conf_min:
-            return LocomotionPlan("forward", f"marching at {cadence:.2f} Hz")
+        clip = "forward"
+        if action and "backward" in available:
+            drift = float(action.get("forward_mps", 0.0) or 0.0)
+            if drift <= -p.march_backward_mps:
+                clip = "backward"
+        if clip in available:
+            return LocomotionPlan(clip, f"marching at {cadence:.2f} Hz")
 
     return STAND
+
+
+def _confident_march(gait: dict[str, object] | None, p: "LocomotionParams") -> bool:
+    """Is the gait cue reporting a march it is sure of?
+
+    One place for the test, because two callers must agree on it: the walk
+    fall-through at the end of :func:`plan_action`, and :func:`_plan_from_action`
+    deciding whether an ``idle`` / ``raise_*`` / ``step_*`` verdict should yield
+    to it. If they used different gates the arbiter could believe the legs are
+    cycling for one purpose and not the other.
+    """
+    if not gait:
+        return False
+    return (str(gait.get("state", "idle")) == "march"
+            and float(gait.get("cadence_hz", 0.0) or 0.0) >= p.walk_cadence_min_hz
+            and float(gait.get("conf", 0.0) or 0.0) >= p.walk_conf_min)
 
 
 # What the human is doing -> which clip answers it. Turning is absent on
@@ -965,25 +997,51 @@ ACTION_TO_CLIP: dict[str, str] = {
 }
 
 
+# Verdicts that a confident march overrules. A human whose legs are cycling is
+# walking, whatever else the frame happens to look like: a foot caught at the
+# top of its swing is not a one-leg stand, and the pelvis swaying with the stride
+# is not a side-step.
+_MARCH_OVERRULES = ("idle", "raise_left", "raise_right", "step_left", "step_right")
+
+
 def _plan_from_action(action: dict[str, object],
                       available: dict[str, str],
-                      p: "LocomotionParams") -> "LocomotionPlan | None":
+                      p: "LocomotionParams",
+                      marching: bool = False) -> "LocomotionPlan | None":
     """Turn one action verdict into a plan, or ``None`` to fall through.
-
-    Three verdicts mean three different things and are answered differently:
 
     ``unknown``  nobody is being seen. Stand -- and stand EXPLICITLY rather than
                  falling through to the gait cue, because a cue that still has
                  warm evidence would happily keep the robot walking at a human
                  who has left the frame. That exact confusion measured as 51.4 s
-                 of false march in a 273 s session.
-    ``idle``     seen, and standing still. Also stand, and also explicitly: the
-                 human is telling us something, and it is "stop".
+                 of false march in a 273 s session. This is the one verdict a
+                 march never overrules.
+    ``idle``     seen, and the PELVIS is standing still. That is not the same as
+                 the human standing still, and treating it so was the whole of
+                 the 2026-09-17 "the robot mimics me instead of walking" report:
+                 the action cue's walk witnesses (0.12 m/s, 80 mm of travel per
+                 0.8 s) were fitted to a faster walker, and a subject marching
+                 in place or walking at 0.07-0.10 m/s reads as idle. Replayed
+                 over that session, the gait cue saw the legs cycling for 59 s
+                 and this returned "standing still" for 75% of it -- so the
+                 legs fell to per-joint pose imitation of a walking human, which
+                 is what wobbled and fell. So idle now YIELDS to a confident
+                 march (``marching``) and stands only when the legs are still
+                 too. Measured on that session: march-to-walk coverage 12.5% ->
+                 83%, with 0.0% false walking on frames where the subject was
+                 demonstrably still.
+    ``raise_*``, ``step_*``  likewise yield to a march: marching leaked into
+                 these in 6.1% of marching frames (a foot at the top of its
+                 swing satisfies the raise gate; stride sway satisfies the
+                 side-step gate), and each leak is a 3-5 s one-leg or side-step
+                 clip played at a walking human. With the override: 0.4%.
     anything else  play the clip for it, if we own one.
     """
     verdict = str(action.get("action", "unknown"))
     if verdict == "unknown":
         return LocomotionPlan(None, "nobody observed")
+    if marching and verdict in _MARCH_OVERRULES:
+        return None                       # the legs are cycling: let the march plan
     if verdict == "idle":
         return LocomotionPlan(None, "human is standing still")
 

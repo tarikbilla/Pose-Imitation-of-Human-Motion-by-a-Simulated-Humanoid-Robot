@@ -974,3 +974,87 @@ def test_aiming_a_turn_beats_chaining_whole_clips(tmp_path) -> None:
         assert fast_e <= math.radians(10.0), (degrees, math.degrees(fast_e))
         if degrees >= 90:            # where chaining clips really hurt
             assert fast_t < 0.75 * slow_t, (degrees, fast_t, slow_t)
+
+
+# ---------------------------------------------------------------------------
+# Two witnesses to one question: the pelvis travels, OR the legs cycle
+# ---------------------------------------------------------------------------
+MARCH = {"state": "march", "cadence_hz": 0.6, "conf": 0.9}
+WEAK_MARCH = {"state": "march", "cadence_hz": 0.6, "conf": 0.3}
+STILL_LEGS = {"state": "idle", "cadence_hz": 0.0, "conf": 0.9}
+WALK_CLIPS = {"forward": "/w/Forwards50.motion", "backward": "/w/Backwards.motion",
+              "leg_raise_left": "/w/RaiseLegLeft.motion", "side_right": "/w/SideStepRight.motion"}
+
+
+def test_idle_yields_to_a_confident_march() -> None:
+    """The 2026-09-17 report, in one assertion.
+
+    The action cue's walk witnesses are absolute speeds fitted to a faster
+    walker; a subject marching in place or walking at 0.07-0.10 m/s reads as
+    "idle" while the gait cue sees the legs cycling. Replayed over that session
+    the old explicit stand answered 75% of 59 s of marching with per-joint pose
+    imitation of a walking human -- which is what wobbled and fell.
+    """
+    idle = {"action": "idle", "conf": 0.4, "forward_mps": 0.02}
+    plan = plan_action(yaw_error_rad=0.0, gait=MARCH, action=idle, available=WALK_CLIPS)
+    assert plan.action == "forward", plan.reason
+    # Standing still with still legs is still a stop, explicitly.
+    plan = plan_action(yaw_error_rad=0.0, gait=STILL_LEGS, action=idle, available=WALK_CLIPS)
+    assert plan.action is None and "standing still" in plan.reason
+
+
+def test_a_march_the_gait_cue_is_unsure_of_does_not_override_idle() -> None:
+    idle = {"action": "idle", "conf": 0.4, "forward_mps": 0.0}
+    assert plan_action(yaw_error_rad=0.0, gait=WEAK_MARCH, action=idle,
+                       available=WALK_CLIPS).action is None
+    slow = dict(MARCH, cadence_hz=0.05)
+    assert plan_action(yaw_error_rad=0.0, gait=slow, action=idle,
+                       available=WALK_CLIPS).action is None
+
+
+def test_nobody_observed_is_never_overridden_by_a_warm_gait_cue() -> None:
+    """The one verdict a march never overrules: a cue with warm evidence must
+    not keep the robot walking at a human who has left the frame (51.4 s of
+    false march in one recorded session came from exactly that)."""
+    gone = {"action": "unknown", "conf": 0.0, "forward_mps": 0.0}
+    plan = plan_action(yaw_error_rad=0.0, gait=MARCH, action=gone, available=WALK_CLIPS)
+    assert plan.action is None and plan.reason == "nobody observed"
+
+
+def test_a_march_beats_a_one_leg_or_side_step_reading() -> None:
+    """A foot caught at the top of its swing is not a one-leg stand, and the
+    pelvis swaying with the stride is not a side-step. Each leak was a 3-5 s
+    clip played at a walking human; measured at 6.1% of marching frames."""
+    for verdict in ("raise_left", "step_right"):
+        posed = {"action": verdict, "conf": 0.9, "forward_mps": 0.01}
+        assert plan_action(yaw_error_rad=0.0, gait=MARCH, action=posed,
+                           available=WALK_CLIPS).action == "forward", verdict
+    # With still legs the same verdicts are honoured, as before.
+    assert plan_action(yaw_error_rad=0.0, gait=STILL_LEGS,
+                       action={"action": "raise_left", "conf": 0.9},
+                       available=WALK_CLIPS).action == "leg_raise_left"
+    assert plan_action(yaw_error_rad=0.0, gait=STILL_LEGS,
+                       action={"action": "step_right", "conf": 0.9},
+                       available=WALK_CLIPS).action == "side_right"
+
+
+def test_a_march_drifting_backward_plays_the_backward_clip() -> None:
+    p = LocomotionParams()
+    back = {"action": "idle", "conf": 0.4, "forward_mps": -(p.march_backward_mps + 0.01)}
+    assert plan_action(yaw_error_rad=0.0, gait=MARCH, action=back,
+                       available=WALK_CLIPS, params=p).action == "backward"
+    # A drift inside the noise band is still a forward march.
+    slight = dict(back, forward_mps=-(p.march_backward_mps - 0.01))
+    assert plan_action(yaw_error_rad=0.0, gait=MARCH, action=slight,
+                       available=WALK_CLIPS, params=p).action == "forward"
+
+
+def test_a_confident_walk_verdict_still_wins_outright() -> None:
+    """The action cue keeps priority when it has a real opinion; the march is a
+    second witness for the cases it misses, not a replacement."""
+    walking = {"action": "walk_backward", "conf": 0.9, "forward_mps": -0.3}
+    assert plan_action(yaw_error_rad=0.0, gait=MARCH, action=walking,
+                       available=WALK_CLIPS).action == "backward"
+    squat = {"action": "squat", "conf": 0.9, "forward_mps": 0.0}
+    assert plan_action(yaw_error_rad=0.0, gait=MARCH, action=squat,
+                       available=dict(WALK_CLIPS, squat="/w/Squat.motion")).action == "squat"
