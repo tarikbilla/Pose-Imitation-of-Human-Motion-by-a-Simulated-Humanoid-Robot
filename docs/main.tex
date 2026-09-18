@@ -12,10 +12,9 @@
 \usepackage{float}
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta, positioning, fit, backgrounds}
+\usepackage{graphicx}
+\usepackage{subcaption}
 \usepackage{hyperref}
-
-% The 1e (One Euro) filter is conventionally written with a euro sign.
-\providecommand{\euro}{\texteuro}
 
 \setlength{\columnsep}{20pt}
 
@@ -50,7 +49,10 @@
 \affil[1]{Department of Information Technology, Electrical Engineering and Mechatronics (IEM)\\
 THM University of Applied Sciences, Friedberg, Germany}
 
-\date{September 2026}
+\renewcommand\Affilfont{\small}
+\date{September 2026\\[0.4em]
+\normalsize Supervisors: M.Sc.\ Severin Stahl \quad Prof.\ Dr.-Ing.\ Hartmut Weber}
+
 
 \begin{document}
 \twocolumn[
@@ -135,12 +137,12 @@ Python pipeline is a generic pose source handling capture, inference, filtering 
 statistics. The Webots controller owns all robot-specific concerns: joint axes, sign
 conventions, mechanical limits, balance and gait.
 
-Two considerations fixed this boundary. Webots embeds its own Python interpreter, into which a
-CUDA-enabled TensorFlow build is difficult to install reliably. More importantly, driving the
-robot's full pose requires its actual limb geometry rather than pre-computed angles, so the
-kinematics belongs with the robot. Consequently all robot-side mathematics resides in
-\texttt{main/libraries/} and imports no simulator module, making it unit-testable without a
-Webots installation.
+Two considerations fixed this boundary: Webots embeds its own Python interpreter, into which a
+CUDA-enabled TensorFlow build is difficult to install reliably; and driving the robot's full
+pose requires its actual limb geometry rather than pre-computed angles, so the kinematics
+belongs with the robot. All robot-side mathematics therefore resides in
+\texttt{main/libraries/} and imports no simulator module, making it unit-testable without
+Webots.
 
 \begin{figure*}[t]
 \centering
@@ -148,7 +150,7 @@ Webots installation.
   \node[blk, minimum width=18mm] (cam)  {Camera / video\\\scriptsize $1920\times1080$};
   \node[blk, right=of cam, minimum width=18mm] (cap) {Capture $+$\\adaptive FPS\\\scriptsize 25--100\,Hz};
   \node[blk, right=of cap, minimum width=24mm] (pose) {MeTRAbs \texttt{eff2s\_y4}\\\scriptsize \texttt{coco\_19}, 19 landmarks\\\scriptsize absolute 3D, mm};
-  \node[blk, right=of pose, minimum width=18mm] (filt) {1\euro{} filter\\\scriptsize speed-adaptive};
+  \node[blk, right=of pose, minimum width=18mm] (filt) {speed-adaptive\\\scriptsize low-pass filter};
   \node[blk, right=of filt, minimum width=18mm] (gait) {Gait $+$ yaw cues\\\scriptsize cadence, phase,\\\scriptsize \texttt{body\_yaw\_rad}};
   \node[blk, right=of gait, minimum width=17mm] (udp) {UDP / JSON\\\scriptsize port 8765};
 
@@ -266,14 +268,16 @@ every consumer.
 
 \subsection{Speed-adaptive smoothing}
 
-A fixed-$\alpha$ exponential average cannot damp per-frame jitter without cost, since its group
-delay of $(1-\alpha)/\alpha$ samples is independent of subject motion. At the measured rate of
-$14.3$~FPS, $\alpha = 0.50$ costs $70$~ms, which is $47\%$ of the latency budget spent on the
-keypoint channel alone and directly observable as robot lag. The 1\euro{}
-filter~\cite{casiez2012oneeuro} instead makes the cutoff a function of speed, applied per axis
-per landmark with a minimum cutoff of $1.0$~Hz and $\beta = 0.005$~Hz per mm/s. The scaling is
-unit-dependent: a brisk limb moves at $1000$ to $2000$~mm/s, so $\beta$ opens the cutoff by $5$
-to $10$~Hz, and with Nyquist at $7.2$~Hz that range separates smoothing from pass-through.
+MeTRAbs estimates each frame independently, so the landmark stream must be filtered. A
+fixed-$\alpha$ exponential average cannot do it without cost, since its group delay of
+$(1-\alpha)/\alpha$ samples is independent of subject motion: at $14.3$~FPS, $\alpha = 0.50$
+costs $70$~ms of the latency budget on the keypoint channel alone, directly observable as robot
+lag. The pipeline instead applies a speed-adaptive low-pass
+filter~\cite{casiez2012oneeuro} per axis per landmark, whose cutoff is a function of measured
+speed, so the delay is spent only while the subject is still. With a minimum cutoff of
+$1.0$~Hz and $\beta = 0.005$~Hz per mm/s, a limb moving at $1000$ to $2000$~mm/s opens the
+cutoff by $5$ to $10$~Hz; with Nyquist at $7.2$~Hz, that range is the difference between
+smoothing and pass-through.
 
 \subsection{Gait and heading cues}
 
@@ -421,25 +425,24 @@ both feet, which indicates a jump or tracking failure but never a step.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[node distance=3.5mm]
-  \node[blk, minimum width=52mm] (dbl)
-       {\textbf{DOUBLE}: symmetric crouch, the validated no-fall baseline};
-  \node[acc, below=of dbl, minimum width=52mm] (load)
-       {\textbf{LOAD}: lean so the centre of mass moves over the stance foot};
-  \node[blk, below=of load, minimum width=52mm] (gate)
-       {stance margin $> 0$ ?\\\scriptsize forward kinematics with link masses,
-        plus foot force sensors};
-  \node[acc, below=of gate, minimum width=52mm] (sgl)
-       {\textbf{SINGLE}: swing leg follows the human, authority scaled by that margin};
-  \draw[flow] (dbl) -- node[lbl, right] {human raises a foot} (load);
+\begin{tikzpicture}[node distance=3.2mm, every node/.style={font=\scriptsize}]
+  \node[blk, text width=48mm] (dbl)
+       {\textbf{DOUBLE} --- symmetric crouch,\\the validated no-fall baseline};
+  \node[acc, below=of dbl, text width=48mm] (load)
+       {\textbf{LOAD} --- lean until the centre\\of mass is over the stance foot};
+  \node[blk, below=of load, text width=48mm] (gate)
+       {stance margin $>0$~?\\forward kinematics with link\\masses, plus foot force sensors};
+  \node[acc, below=of gate, text width=48mm] (sgl)
+       {\textbf{SINGLE} --- swing leg follows\\the human, authority from that margin};
+  \draw[flow] (dbl) -- node[lbl, right=1pt] {foot raised} (load);
   \draw[flow] (load) -- (gate);
-  \draw[flow] (gate) -- (sgl);
-  \draw[ret] (sgl.west) -- ++(-5mm,0)
-       |- node[lbl, accline, pos=0.30, left] {UNLOAD} (dbl.west);
+  \draw[flow] (gate) -- node[lbl, right=1pt] {pass} (sgl);
+  \draw[ret] (sgl.east) -- ++(4mm,0)
+       |- node[lbl, accline, pos=0.25, right=1pt] {UNLOAD} (dbl.east);
 \end{tikzpicture}
 \caption{Weight-transfer sequencer. Shift and lift are rate-limited blends in $[0,1]$, so there
 are no discrete transitions and no state that can become stuck. UNLOAD is entered when the foot
-is lowered, the margin is lost, or the torso tilts.}
+is lowered, the margin is lost, or the torso tilts past $0.40$~rad.}
 \label{fig:liftfsm}
 \end{figure}
 
@@ -490,43 +493,42 @@ free-standing NAO is a research project in itself, and teleporting the base thro
 Supervisor node destabilises the physics. Without clips on disk the controller falls back to
 the march engine, which tracks cadence, phase and stop but marches in place.
 
-\textbf{Preparation ramp.} Every walk and turn clip opens in a deep, sole-flat crouch of about
-$0.51$~rad, while the controller stands at $u = 0.10$. Since playback commands the first
-keyframe immediately with the velocity caps already lifted, direct handover demands $0.84$~rad
-of knee travel in one $20$~ms step. The arbiter therefore reads the clip's first keyframe,
-ramps the legs to it, and starts playback only once the measured joints have arrived. All
-joints must arrive together: the knee travels $0.842$~rad, the hip $0.405$ and the ankle
-$0.437$, and since sole attitude is their sum, a single flat rate drives that sum to
-$0.405$~rad, eight times the tilt budget, and the support margin to $-0.064$~m. Scaling each
-joint's rate by its share of the longest travel gives a sum of $0.0000$~rad and a margin of
-$+0.0596$~m in the same $0.56$~s. The return is a ramp too, seeded from the posture the clip
-left, since a clip ends in the same squat.
+\textbf{Preparation ramp.} Every clip opens in a sole-flat crouch of about $0.51$~rad while
+the controller stands at $u = 0.10$, and playback commands its first keyframe immediately with
+the velocity caps lifted, so direct handover would demand $0.84$~rad of knee travel in one
+$20$~ms step. The arbiter therefore ramps the legs to the clip's opening pose and starts
+playback only once the measured joints arrive. They must arrive \emph{together}: the knee
+travels $0.842$~rad, the hip $0.405$ and the ankle $0.437$, and sole attitude is their sum, so
+a single flat rate drives that sum to $0.405$~rad --- eight times the tilt budget --- and the
+support margin to $-0.064$~m. Scaling each joint's rate by its share of the longest travel
+holds the sum at $0.0000$~rad and the margin at $+0.0596$~m in the same $0.56$~s. The return is
+a ramp too, seeded from the posture the clip leaves.
 
 \textbf{Exit policy.} A clip boundary is a balanced double-support pose, so playing the whole
-clip is the safe default, but that makes clip length the latency of stopping and imposes the
+clip is the safe default --- but that makes clip length the latency of stopping and pays the
 start-stop transient on every stride. That transient is $49\%$ of \texttt{Forwards.motion}'s
-$2.60$~s, and during the closing settle the torso travels $17$~mm backward, which is why
-chained clips measured $0.036$~m/s against a documented $0.10$~m/s. Three exits exist, in order
-of preference: leaving a detectable gait cycle, stopping at a safe keyframe, and the tilt
-abort. The second has a momentum component that is easy to miss, since stopping the legs does
-not stop the robot: the capture point~\cite{pratt2006capture} lies $v/\omega$ ahead of the
-centre of mass with $\omega \approx 5.9$~rad/s at this crouch, so $0.18$~m/s throws it $30$~mm
-past the centre of mass against a $40$ to $60$~mm budget. Thirteen of the $46$ poses passing
-the static test are moving that fast.
+$2.60$~s, and the closing settle carries the torso $17$~mm backward, which is why chained clips
+measured $0.036$~m/s against a documented $0.10$~m/s. Three exits exist, in order of
+preference: leaving a detectable gait cycle, stopping at a certified keyframe, and the tilt
+abort. The second carries a momentum term that a purely static test misses, since stopping the
+legs does not stop the robot: the capture point~\cite{pratt2006capture} lies $v/\omega$ ahead
+of the centre of mass with $\omega \approx 5.9$~rad/s at this crouch, so $0.18$~m/s throws it
+$30$~mm past, against a $40$ to $60$~mm budget. Thirteen of the $46$ statically acceptable
+poses are moving that fast.
 
-\textbf{Cyclic gait.} The clips are animations comprising squat, acceleration, stride,
-deceleration and stand; the stride is satisfactory and the surrounding transient is the cost.
-The middle of the long walk clip is a true limit cycle, with
+\textbf{Cyclic gait.} The clips are animations --- squat, acceleration, stride, deceleration,
+stand --- in which the stride is satisfactory and the surrounding transient is the cost. The
+middle of the long walk clip is a true limit cycle, with
 $\max_j |q_j(4.23\,\mathrm{s}) - q_j(2.95\,\mathrm{s})| = 0.0000$~rad over all twelve leg
 joints. The segment can therefore be rewound with \texttt{setTime()} without commanding joint
 motion at the seam, making one clip a gait generator: a $1.28$~s stride advancing $0.093$~m,
-giving $0.073$~m/s sustained. The schedule is derived from the clip's keyframes at run time rather than tabulated,
-so it cannot diverge from the shipped files, and a non-cyclic clip is detected rather than
-looped on assumption. The seam must be exact to one microradian, since it is a teleport
-executed in one step with the caps lifted, and the cycle must translate the robot by at least
-$0.02$~m, since looping a turn or side-step would rotate or drift it indefinitely. Cycling does
-not lengthen the stride; it removes the transient between strides, reducing a $10$~s walk from
-47 stand-squat cycles to one.
+giving $0.073$~m/s sustained. The schedule is derived from the keyframes at run time rather than tabulated, so it cannot
+diverge from the shipped files, and a non-cyclic clip is detected rather than looped on
+assumption. Two conditions keep this honest: the seam must be exact to one microradian, being a
+teleport executed in one step with the caps lifted, and the cycle must translate the robot by
+at least $0.02$~m, since looping a turn or side-step would rotate or drift it indefinitely.
+Cycling does not lengthen the stride; it removes the transient between strides, reducing a
+$10$~s walk from 47 stand-squat cycles to one.
 
 \textbf{Trimming the tail.} Leaving the cycle jumps into the clip's own deceleration, but that
 tail is not uniformly deceleration. After $8.45$~s the clip commands no further travel and the
@@ -563,11 +565,12 @@ that cannot be stopped part-way, where it prevents a limit cycle in which a $60\
 asked to correct $17\degree$ overshoots to $-43\degree$ and asks again.
 
 \textbf{Freeze resistance.} A clip owns the whole body, so anything preventing it from
-reporting completion would freeze the entire robot. A watchdog bounds suspension and retires
-the offending clip, a failure backoff abandons clips after three bad attempts since repeated
-falling is worse than never walking, and a settled-start check ensures clips start only from
-an upright, calm robot. Separately, an exception in a control step is logged and the body
-reclaimed rather than terminating the loop, which previously zeroed every motor velocity.
+reporting completion freezes the robot. A watchdog bounds suspension and retires the offending
+clip; a backoff abandons clips after three bad attempts, on the reasoning that repeated falling
+is worse than never walking; and a settled-start check admits clips only from an upright, calm
+robot. Section~9 reports a session in which that backoff proved too blunt. Separately, an
+exception in a control step is logged and the body reclaimed rather than terminating the loop,
+which previously zeroed every motor velocity.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{Sensing and Diagnosis}
@@ -669,28 +672,53 @@ Turn & steps round the full circle & clip granularity \\
 \end{tabular}
 \end{table}
 
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[t]{0.325\textwidth}
+  \includegraphics[width=\linewidth]{imgs/1.png}
+  \caption{Arms extended laterally; torso yaw $+4.0\degree$.}
+  \label{fig:shot-tpose}
+\end{subfigure}\hfill
+\begin{subfigure}[t]{0.325\textwidth}
+  \includegraphics[width=\linewidth]{imgs/2.png}
+  \caption{Single-arm raise; torso yaw $+18.2\degree$.}
+  \label{fig:shot-raise}
+\end{subfigure}\hfill
+\begin{subfigure}[t]{0.325\textwidth}
+  \includegraphics[width=\linewidth]{imgs/3.png}
+  \caption{Torso yaw $+81.2\degree$; the robot has stepped round.}
+  \label{fig:shot-turn}
+\end{subfigure}
+\caption{Live operation: the Webots simulation (left of each pane) beside the annotated camera
+feed (right). The overlay reports throughput, per-frame pipeline latency, landmark count and
+the current gait, yaw and action verdicts. Across these captures the pipeline held $17.5$ to
+$18.7$~FPS at $53.4$ to $57.1$~ms with all $25$ landmarks tracked, while the heading servo
+followed the subject's torso yaw from $+4.0\degree$ to $+81.2\degree$.}
+\label{fig:shots}
+\end{figure*}
+
 \subsection{Perception timing}
 
 Timings are from the target workstation (RTX~3090~Ti and RTX~3070, Python~3.12, Webots
 \texttt{basicTimeStep} $20$~ms). Per-frame inference costs $75.9$~ms when the person detector
 runs and $36.2$~ms on a tracked box, so at \texttt{detect\_interval}${}=2$ the mix averages
-$\approx 56$~ms. Measured over $31{,}243$ consecutively recorded frames with a subject in
-shot, the whole perception loop closes in $63$~ms at the median and $95$~ms at the 90th
-percentile, i.e.\ $16.0$~FPS sustained. Inference is therefore essentially the entire budget:
-the gait cue costs $0.030$~ms, the action cue $0.011$~ms, the 1\euro{} filter $0.022$~ms per
+$\approx 56$~ms. Over the $18{,}437$ frames of the session in Fig.~\ref{fig:shots} the whole
+perception loop closes in $56.1$~ms at the median and $87.4$~ms at the 90th percentile, i.e.\
+$17.8$~FPS sustained, agreeing with the on-screen overlay; an earlier $31{,}243$-frame session
+gave $63$~ms and $16.0$~FPS. Inference is therefore essentially the entire budget:
+the gait cue costs $0.030$~ms, the action cue $0.011$~ms, the landmark filter $0.022$~ms per
 axis, the arbiter $0.002$~ms and a UDP round trip $0.005$~ms, together under $0.1$~ms. One
 caveat for anyone repeating this: a frame containing no person returns in $42$~ms because the
 pose network is skipped, so benchmarking on blank input understates the cost by about a
 quarter.
 
-Summing independently measured stages gives $\approx 121$~ms from camera exposure to motor
-command for the arm and head channel: one $63$~ms frame period, up to one $20$~ms control step
-of quantisation, and $38$~ms of residual lag in the arm filter, whose time-constant-plus-lead
-formulation replaced a frame-rate-clocked exponential filter costing $108$~ms. This sits within
-the $150$~ms requirement at the median but not at the 90th percentile. It remains a sum of
-parts rather than a single stopwatch reading, because the controller logs its own control-step
-counter rather than the pipeline's frame index; adding that one field would make the
-end-to-end figure directly measurable and is the most valuable instrumentation still missing.
+Summing independently measured stages gives $\approx 115$~ms from camera exposure to motor
+command for the arms and head: one $56$~ms frame period, up to one $20$~ms control step of
+quantisation, and $38$~ms of residual filter lag, the last replacing a frame-rate-clocked
+exponential filter that cost $108$~ms. This meets the $150$~ms requirement at the median but
+not at the 90th percentile. It remains a sum of parts rather than one stopwatch reading,
+because the controller logs its own step counter rather than the pipeline's frame index; that
+single field is the most valuable instrumentation still missing.
 
 \subsection{Locomotion}
 
@@ -806,9 +834,15 @@ cyclic-clip exit defect reported in an earlier revision has been resolved.
 \section{Limitations and Conclusions}
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-\texttt{ElbowYaw} and \texttt{WristYaw} remain at rest, so forearm twist is not imitated;
-recovering it requires hand landmarks \texttt{coco\_19} does not provide. Two defects found in
-the session logs are open. The locomotion backoff retires all clips after three failures
+Scope is bounded first by what the robot may attempt. Aerial and highly dynamic motion ---
+flips, jumps, running --- is excluded by construction: every leg command passes a quasi-static
+centre-of-mass test that presumes continuous ground contact, and the simultaneous absence of
+both feet is treated as a tracking failure rather than a manoeuvre. Backward locomotion is
+weaker than forward: \texttt{Backwards.motion} contains no detectable limit cycle, so unlike
+the forward clip it cannot be rewound and must be replayed one shot at a time, paying its
+start-stop transient on every step and bounding a backward walk at roughly half the forward
+sustained speed. Lateral motion shares that limitation. Two defects found in the session logs
+are also open. The locomotion backoff retires all clips after three failures
 counted over an entire session with no decay, so three unlucky preparation ramps minutes apart
 are indistinguishable from a broken clip set; it disabled locomotion $21$~s into a
 $8{,}077$~s run. The cumulative ramp ceiling intended to bound that case is cleared by the
@@ -822,45 +856,39 @@ validated by the quasi-static certifier, which already rejects the shipped clips
 live testing. Removing the quantisation altogether wants an online gait generator or a learned
 policy~\cite{ze2025twist}; the heading servo already accepts a continuous action.
 
-End-to-end latency is still a sum of separately measured stages rather than one measurement,
-because the controller logs its own step counter instead of the pipeline's frame index. Two
-further items warrant a check on the target machine: the torso-yaw sign convention against real
-MeTRAbs output, and whether the IMU pitch scale can be raised toward the analytically correct
-$2.0$. The accelerometer path wants a complementary or Kalman filter fusing gyro integration
-with gravity. Finally, the action classifier's walk witnesses remain absolute speeds fitted to
-one subject; expressing them relative to the subject's own leg length and a noise floor learned
-at session start would remove the recalibration the two-witness trigger currently compensates
-for. A per-joint error study against fixed reference motions would convert the
-imitation-fidelity requirement from a target into a measurement; the logs and tooling exist.
+End-to-end latency remains a sum of measured stages rather than one measurement, because the
+controller logs its own step counter instead of the pipeline's frame index. Two items warrant a
+check on the target machine: the torso-yaw sign convention against real MeTRAbs output, and
+whether the IMU pitch scale can be raised toward the analytically correct $2.0$. The
+accelerometer path wants a complementary or Kalman filter fusing gyro integration with gravity.
+Finally, the action classifier's walk witnesses are absolute speeds fitted to one subject;
+expressing them relative to leg length and a noise floor learned at session start would remove
+the recalibration the two-witness trigger currently compensates for. A per-joint error study
+against fixed reference motions would turn the imitation-fidelity requirement from a target
+into a measurement; the logs and tooling exist.
 
 A simulated humanoid can be teleoperated convincingly from one RGB camera, provided the
 retargeted pose is treated as a request rather than a command. Three structural decisions
 carried this project: retargeting in a torso-local basis, making the mapping invariant to
 subject heading; enforcing that exactly one control layer owns the leg joints on any step; and
 granting authority by whether a pose displaces the centre of mass, so mirror-symmetric motions
-pass at full fidelity while displacing motions receive a compensating pelvis shift under
-explicit bounds. The project's defects share a common character: the playback confirmation
-defect, the double-clamped pelvis shift, the axis-masking artefact, the force-sensor veto and
-the non-convergent overshoot fraction were all silent, with the robot continuing to behave
-plausibly while a stated invariant was violated. None was found by observation. All were found
-by stating the invariant the code claimed and then measuring, across whole recorded sessions,
-whether it held.
+pass at full fidelity while displacing motions receive a bounded compensating pelvis shift.
+The project's defects share a character worth recording: the playback-confirmation defect, the
+double-clamped pelvis shift, the axis-masking artefact, the force-sensor veto, the
+non-convergent overshoot fraction and the locomotion kill switch were all silent, the robot
+continuing to behave plausibly while a stated invariant was violated. None was found by
+observation; all were found by stating the invariant the code claimed and measuring, across
+whole recorded sessions, whether it held.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section*{Acknowledgments}
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-The authors thank M.Sc.~Severin Stahl (THM, Campus Friedberg, IEM) for supervising the project
-and for guidance on scope, requirements and evaluation methodology. This work was carried out
-as Group~C's project for the CSPM 2026S course, and was supported by the Department of
-Information Technology, Electrical Engineering and Mechatronics at THM University of Applied
-Sciences. The authors declare no conflicts of interest.
+The authors thank M.Sc.~Severin Stahl and Prof.~Dr.-Ing.~Hartmut Weber (THM, Campus
+Friedberg, IEM) for supervising this project and for guidance on scope, requirements and
+evaluation methodology. The work was carried out as Group~C's project for the CSPM 2026S
+course. The authors declare no conflicts of interest.
 
-% =============================================================================
-% NOTE TO THE AUTHORS: the contributions below are derived from the repository's
-% commit history and module ownership. Please review and adjust before submission;
-% only the two committing authors' roles are verifiable from the repository.
-% =============================================================================
 \textbf{Author contributions.} Tarik Billa designed the system architecture and process split
 and implemented the perception pipeline, retargeting mathematics, leg-control arbiter, balance
 and locomotion layers, and log-analysis tooling. Salih Keceli contributed to the Webots world
