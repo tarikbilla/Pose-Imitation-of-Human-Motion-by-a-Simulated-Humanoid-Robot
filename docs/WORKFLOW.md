@@ -4,6 +4,24 @@
 
 This document describes the complete workflow and architecture of the **Pose Imitation of Human Motion by a Simulated Humanoid Robot** system. The pipeline captures human motion from video input, processes it through computer vision algorithms, and drives a simulated humanoid robot in Webots to imitate the detected poses in real-time.
 
+Each phase below carries a **Libraries** block (what it is built on) and a
+**Latency** block (what it costs, measured on this project). The consolidated
+budget is in [Latency Budget](#latency-budget); one-off costs that are measured
+in minutes rather than milliseconds are in [One-Off Costs](#one-off-costs-minutes-not-milliseconds).
+
+> **Measurement conditions for every timing in this document.** Measured
+> 2026-09-18 on the project's own target PC: NVIDIA RTX 3090 Ti (24 GB) + RTX
+> 3070 (8 GB), Python 3.12, TensorFlow GPU build, Webots `basicTimeStep` 20 ms.
+> Perception stages were timed by replaying 4 000 recorded frames from
+> `logs/run_20260918_125223/pose_keypoints.csv`; MeTRAbs was timed on 30 warm
+> 1920x1080 frames with the shipped `metrabs_eff2s_y4` backbone, `num_aug=1`,
+> `max_detections=1`; the controller loop was read from
+> `logs/webots_joint_trajectory_1789730415.csv` (8 153 s of simulation).
+> Inference must be timed **with a subject in shot**: a blank frame short-circuits
+> the pose network and reads ~25% fast.
+> `p50` is the median, `p90`/`p99` the tail. Re-measure on other hardware --
+> the GPU term dominates and nothing else here is close to it.
+
 ---
 
 ## System Architecture
@@ -108,6 +126,18 @@ This document describes the complete workflow and architecture of the **Pose Imi
      - Timestamp (seconds since start)
      - BGR image array (numpy ndarray)
 
+### Libraries used
+| Library | Version | Used for |
+|---|---|---|
+| `opencv-python` | >=4.9,<5.0 | `VideoCapture`, backend selection, colour conversion, buffer sizing |
+| V4L2 / AVFoundation / DirectShow | OS | the capture backend OpenCV drives |
+
+### Latency
+| Item | Measured | Note |
+|---|---|---|
+| Capture + decode + colour convert | **~7 ms** p50 | Derived: the 63 ms whole-loop period minus the ~56 ms inference mix. 1920x1080 costs capture bandwidth, not inference time -- MeTRAbs rescales internally, so dropping to 1280x720 helps only if capture is the bottleneck. |
+| `cv2.CAP_PROP_BUFFERSIZE` | 1 frame | Anything larger adds a whole frame period of stale video before the pipeline ever sees it. |
+
 ### Key Features
 - Robust error handling with consecutive failure tracking
 - Platform-aware backend selection
@@ -159,6 +189,34 @@ This document describes the complete workflow and architecture of the **Pose Imi
      - Timestamp
      - Frame index
      - Dictionary of named keypoints (e.g., "left_shoulder", "right_elbow")
+
+### Libraries used
+| Library | Version | Used for |
+|---|---|---|
+| `tensorflow` (GPU build) | >=2.12,<2.16 | runs the MeTRAbs SavedModel |
+| `tensorflow-hub` | >=0.15,<0.17 | loads the model from the TF-Hub zip / local cache |
+| `numpy` | >=1.26,<2.1 | landmark arrays, the joint-jump filter |
+| `opencv-python` | >=4.9,<5.0 | image handover to the model |
+
+### Latency
+**This phase is the pipeline's cost.** Every other perception stage together is
+under 0.1 ms; this one is ~56 ms.
+
+| Item | Measured | Note |
+|---|---|---|
+| Whole perception loop, real subject | **p50 63 ms / p90 95 ms → 16.0 FPS** | 31 243 recorded frames. Inference is essentially all of it. |
+| Inference, detector frame | **75.9 ms** | the YOLOv4 person detector runs |
+| Inference, tracked-box frame | **36.2 ms** | box carried from the previous detection |
+| Mix at `detect_interval: 2` | **~56 ms** | what the loop actually pays per frame |
+| `estimate()` on a **blank** frame | 42 ms | detector only, pose network skipped — **not** a valid benchmark; always measure with a subject in shot |
+| First call after load | **15.1 s** | one-off TensorFlow graph warm-up; the pipeline is not usable until it has passed |
+| Model load, cold | **31 s** | one-off per process, from the 371 MB `~/.cache/metrabs` |
+| `pose.skeleton` choice | **no cost** | every named skeleton is an index gather out of the same 122-joint superset: 152.1 ms/call for the superset against 152.4 ms for `coco_19` on the earlier reference machine |
+
+The backbone is the one knob that moves this number (`pose.model_url`):
+`metrabs_mob3s_y4` / `metrabs_rn18_y4` are faster and less accurate,
+`metrabs_eff2l_y4` slower and more accurate. `pose.detect_interval` (default 2)
+reruns the YOLOv4 person detector only every N frames and tracks in between.
 
 ### Key Features
 - Real GPU-accelerated 3D pose tracking
@@ -240,6 +298,20 @@ Lower Body: left/right knee, left/right ankle
 - `LHipPitch` / `RHipPitch`
 - `TorsoPitch`
 
+### Libraries used
+| Library | Version | Used for |
+|---|---|---|
+| `numpy` | >=1.26,<2.1 | vector maths for the geometric IK |
+| `math` | stdlib | angle solving (`atan2`, `acos`) |
+
+### Latency
+| Item | Measured | Note |
+|---|---|---|
+| `RetargetingMapper.map()` | **<0.01 ms** | below timer resolution over 4 000 replayed frames |
+
+This is the *fallback* channel only. The primary path streams raw landmarks and
+solves on the robot side in `main/libraries/nao_retarget.py` — see Phase 8.
+
 ### Key Features
 - Geometric inverse kinematics approach
 - Hardware-safe joint limits
@@ -275,6 +347,18 @@ Lower Body: left/right knee, left/right ankle
    - Maintains motion continuity
    - Prevents abrupt joint changes
 
+### Libraries used
+| Library | Version | Used for |
+|---|---|---|
+| `src/utils/filtering.py` | in-repo | `OneEuroFilter` (keypoints), `ExponentialSmoother` (angles) |
+| `numpy` | >=1.26,<2.1 | array maths |
+
+### Latency
+| Item | Measured | Note |
+|---|---|---|
+| `OneEuroFilter.update()`, one axis | **0.022 ms** p50 | x, y and z filter separately, so ~0.07 ms per frame |
+| Delay it *adds* | **speed-dependent, by design** | A fixed-alpha EMA charges a flat `(1-alpha)/alpha` samples whether the subject moves or not — 70 ms at `alpha=0.5`, nearly half the 150 ms budget. One Euro spends that delay only while the subject is still and gets out of the way when they move. |
+
 ### Key Features
 - Real-time filtering (minimal latency)
 - Per-joint independent smoothing
@@ -309,6 +393,19 @@ Lower Body: left/right knee, left/right ankle
    - Sleeps between frames to match target FPS
    - Prevents resource over-utilization
    - Balances responsiveness vs. CPU usage
+
+### Libraries used
+| Library | Version | Used for |
+|---|---|---|
+| `src/utils/fps.py` | in-repo | `AdaptiveFPSController` |
+| standard `time` | stdlib | monotonic clock, inter-frame sleep |
+
+### Latency
+| Item | Measured | Note |
+|---|---|---|
+| Controller overhead | **<0.01 ms** | arithmetic only |
+| `latency_budget_ms` | **150 ms** (config) | the target it steers toward |
+| Achieved loop period | **63 ms p50 / 95 ms p90** | 16.0 FPS effective over 31 243 recorded frames. The ~56 ms GPU term means the 100 FPS ceiling is unreachable on this backbone; the controller settles where the GPU allows. |
 
 ### Configuration
 - `initial_fps`: 30
@@ -356,6 +453,16 @@ Lower Body: left/right knee, left/right ankle
    - Flag: `--no-display`
    - Disables visualization for server/SSH environments
    - Pipeline continues without GUI
+
+### Libraries used
+| Library | Version | Used for |
+|---|---|---|
+| `opencv-python` | >=4.9,<5.0 | `imshow`, drawing primitives, `waitKey` |
+
+### Latency
+| Item | Measured | Note |
+|---|---|---|
+| Overlay draw + `imshow` | part of the ~21 ms non-GPU budget | `--no-display` removes it; use for headless runs and benchmarking |
 
 ### Key Features
 - Real-time visual feedback
@@ -429,6 +536,22 @@ Lower Body: left/right knee, left/right ankle
    - Flag: `--no-webots`
    - Enables pure perception demo mode
    - Useful for testing without Webots
+
+### Libraries used
+| Library | Version | Used for |
+|---|---|---|
+| `socket` (stdlib) | stdlib | connectionless UDP, no handshake and no retransmit |
+| `json` (stdlib) | stdlib | payload encoding |
+
+### Latency
+| Item | Measured | Note |
+|---|---|---|
+| `sendto` + `recv` on localhost | **0.005 ms p50 / 0.008 ms p99** | 5 000 round trips |
+| Payload size | **2 472 bytes** | one datagram; no fragmentation on loopback |
+| Queue drain policy | keeps only the **freshest** datagram | The controller runs at 50 Hz and the camera at 16 Hz, so a queue could only ever add age. Draining to the newest frame is what keeps the stale-frame term at zero. |
+
+UDP is chosen over TCP precisely here: a retransmitted pose frame is worse than
+a dropped one, because by the time it arrives the human has moved.
 
 ### Key Features
 - Ultra-low latency (<5ms network overhead)
@@ -535,6 +658,51 @@ WorldInfo {
 the feet slide, the robot cannot load one foot or take a step, and the leg
 controller *looks frozen* because every leg command is absorbed by foot slip.
 
+### Libraries used
+| Library | Version | Used for |
+|---|---|---|
+| Webots `controller` module | R2025a | `Robot`, `Motion`, `InertialUnit`, `Supervisor`, `TouchSensor` |
+| `numpy` | >=1.26,<2.1 | forward kinematics and the centre-of-mass model in `balance.py` |
+| `main/libraries/*` | in-repo | `nao_retarget`, `lower_body`, `balance`, `gait`, `walk_motion`, `clip_forge`, `clip_safety`, `pose_control_utils` |
+
+### Latency
+
+**Control loop**
+
+| Item | Measured | Note |
+|---|---|---|
+| `basicTimeStep` | **20 ms** | Webots' 32 ms default is too coarse for NAO's legs |
+| Wall time per step | **20.3 ms** | realtime factor **0.983** over 8 153 s of simulation |
+| `plan_action()`, the leg arbiter | **0.002 ms** p50 | the decision is free; what it commits to is not |
+| Arm/head chain residual lag | **38 ms** | `ARM_TAU_S` 0.07 s + `ARM_LEAD_S` 0.20 s, measured over 5 473 frames. The previous frame-rate-clocked EMA cost 108 ms. |
+| `STALE_AFTER_S` | **0.5 s** | no command for this long → hold pose, then stand down |
+
+**Decision latency — human does a thing, robot does it**
+
+A clip is a *commitment*: while one plays it owns the 12 leg joints, open loop.
+These are the numbers that decide how responsive the robot feels, and they are
+seconds, not milliseconds.
+
+| Event | Measured | Where the time goes |
+|---|---|---|
+| Walk **starts** | **790 ms** (cue) + **560 ms** (prepare ramp) | The action cue wants 80 mm of pelvis travel across its 0.8 s window before committing; the ramp puts the legs in the clip's opening crouch at `LEG_POSE_RATE` 1.5 rad/s. |
+| Walk **stops** | **165 ms** (cue) + **600 ms** (`WALK_LATCH_RELEASE_S`) + up to **2.46 s** (clip) | The clip term is one stride period (1.28 s) to reach the free exit phase, then a 1.18 s settle. Its closing stand-up (another 1.28 s) is skipped — see `GaitCycle.rest_s`. |
+| Walk speed | **0.073 m/s** sustained | `Forwards50.motion` cycled. Motor-limited: the clip already peaks at **84%** of the motors' rated speed, so it cannot be retimed faster. |
+| Turn 90° | **4.6 s**, one clip, residual **1.1°** | `TurnLeft180`/`TurnRight180`, entered after their 1.20 s opening crouch and stopped at the certified keyframe nearest the heading error. |
+| Turn 180° | **8.5 s**, one clip, residual **3.9°** | |
+| Turn rate | **20.7 °/s** | against 13.8 °/s for the 40° clips, ~60% of whose runtime is their own start/stop transient |
+| Smallest turn served | **21°** | below this the heading error is left alone |
+| Squat / one-leg / stance width | **continuous, no clip** | pose imitation, so no commitment and no clip latency |
+
+**Watchdogs**
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `CLIP_PREPARE_TIMEOUT_S` | 2.5 s | per-action ramp ceiling |
+| `CLIP_PREPARE_RUN_TIMEOUT_S` | 3.5 s | total ramp ceiling across a dithering planner |
+| `MOTION_WATCHDOG_S` | 8.0 s | fallback when a clip never reports itself finished |
+| `CLIP_EXIT_TOLERANCE_S` | 0.03 s | how near a certified keyframe counts as being at one |
+
 ### Key Features
 - Realistic physics with correct foot friction
 - One commander per step — no layer fighting
@@ -588,6 +756,20 @@ controller *looks frozen* because every leg command is absorbed by foot slip.
 - `pose_keypoints.csv` - Detected human pose
 - `performance.csv` - System metrics
 
+### Libraries used
+| Library | Version | Used for |
+|---|---|---|
+| `csv` | stdlib | trajectory and keypoint logs |
+| `logging` | stdlib | console startup block and periodic status line |
+| `matplotlib` | >=3.8,<4.0 | offline plots in `scripts/` |
+
+### Latency
+| Item | Measured | Note |
+|---|---|---|
+| One trajectory row | negligible against the 20 ms step | 131 columns, buffered CSV write |
+| Status line | every **100 frames** (`STATUS_EVERY`) ≈ 2 s of simulation | plain-language summary of what the legs are doing and why |
+| Log growth | ~**220 MB** per 5 700 s episode | `logs/` is git-ignored; prune between sessions |
+
 ### Key Features
 - Automatic timestamped organization
 - CSV format for universal compatibility
@@ -614,13 +796,82 @@ controller *looks frozen* because every leg command is absorbed by foot slip.
 6. Robot Actuation (Webots physics) → Humanoid imitation
 ```
 
-### Key Performance Characteristics
-- **End-to-end latency / frame rate / pose-detection timing**: depends heavily
-  on the GPU and MeTRAbs backbone chosen (`pose.model_url`) -- unverified on
-  this machine (written without GPU access); benchmark on the target hardware.
-- **Retargeting**: <1ms per frame
-- **UDP transmission**: <1ms per frame
-- **Smoothing**: <1ms per frame
+<a name="latency-budget"></a>
+### Latency Budget
+
+Every row below was measured on this project (see the conditions note at the top
+of this document). Two things are worth reading off it before anything else:
+
+1. **One stage costs ~56 ms and the rest of perception costs 0.07 ms.** Tuning
+   anything but the GPU stage is tuning noise.
+2. **The robot's *motion* latency is ~120 ms; its *decision* latency is seconds.**
+   These are different budgets with different causes, and conflating them is how
+   "the robot is laggy" got misdiagnosed for four sessions — the imitation loop
+   was never the problem, the clip commitment was.
+
+#### A. Motion latency — you move, the robot's motors move
+
+| # | Stage | Library | p50 | p90 |
+|---|---|---|---|---|
+| 1 | Capture + decode + overlay | OpenCV / V4L2 | ~7 ms | — |
+| 2 | **MeTRAbs inference** (mix at `detect_interval: 2`) | TensorFlow + TF-Hub | **~56 ms** | — |
+| 3 | Keypoint smoothing (3 axes) | `OneEuroFilter` | 0.07 ms | — |
+| 4 | Gait cue | `gait_cues.py` | 0.030 ms | 0.034 ms |
+| 5 | Action cue | `action_cues.py` | 0.011 ms | 0.012 ms |
+| 6 | UDP send → receive | `socket` + `json` | 0.005 ms | 0.008 ms |
+| 7 | Controller step quantisation | Webots | ≤20 ms | — |
+| 8 | Arm/head filter residual | `ArmTracker` | 38 ms | — |
+| | **Sum (arms/head)** | | **~121 ms** | **~153 ms** |
+
+Measured whole-loop camera period: **63 ms p50 / 95 ms p90 → 16.0 FPS**
+effective, over 31 243 recorded frames. The `runtime.latency_budget_ms` target
+is 150 ms, so the median loop sits inside budget and the p90 sits just outside
+it; the adaptive FPS controller cannot recover that because the ~56 ms GPU term
+is a floor, not a load.
+
+> The sum is a sum of independently measured stages, not a single end-to-end
+> stopwatch reading. An end-to-end measurement would need the controller to log
+> the pipeline's `frame_index`, which it currently does not (its `frame_index`
+> column is its own control-step counter). That is the one number in this
+> document worth adding instrumentation for.
+
+#### B. Decision latency — you do a thing, the robot decides to do it
+
+| Event | Measured | Dominated by |
+|---|---|---|
+| Walk starts | **~1.35 s** | 790 ms cue + 560 ms prepare ramp |
+| Walk stops | **0.8 – 3.2 s** | 165 ms cue + 600 ms latch + ≤2.46 s clip |
+| Turn 90° | **4.6 s** | the clip, at 20.7 °/s |
+| Turn 180° | **8.5 s** | the clip |
+| Squat / one-leg / stance | **motion latency only (~121 ms)** | no clip involved |
+
+#### C. What each budget is bounded by
+
+| Budget | Bound | Can it be improved? |
+|---|---|---|
+| Motion latency | MeTRAbs inference, ~56 ms | Yes — a smaller backbone (`metrabs_mob3s_y4`), or a larger `pose.detect_interval`, at a stated accuracy cost |
+| Walk speed | 0.073 m/s | **No** — the clip peaks at 84% of rated motor speed; retiming it faster is not available |
+| Turn rate | 20.7 °/s | Turn clips run at 52% of rated speed, so there *is* headroom — but retiming a dynamically balanced clip needs live validation, not the certifier (which already fails the shipped clips) |
+| Walk stop | 2.46 s | Already cut from 3.73 s by trimming the clip's dead tail |
+| Walk start | 1.35 s | The 790 ms is a deliberate trade: the 80 mm travel witness cut false walking 18.8% → 1.7% |
+
+<a name="one-off-costs-minutes-not-milliseconds"></a>
+### One-Off Costs (minutes, not milliseconds)
+
+These are the things that make you wait. Everything above is per-frame; this is
+per-session or per-install.
+
+| Step | Duration | Frequency | Note |
+|---|---|---|---|
+| `conda env create -f environment.yml` | **~5–15 min** | once per machine | network-bound; TensorFlow + CUDA runtime is the bulk |
+| MeTRAbs model download | **~2–5 min** (371 MB) | once per machine | cached in `~/.cache/metrabs`, survives reboots (`$METRABS_CACHE_DIR` to relocate) |
+| MeTRAbs model load | **31 s** | **every pipeline start** | cold load of the SavedModel |
+| TensorFlow graph warm-up | **15.1 s** | **every pipeline start** | the first `estimate()` call; the window opens before this finishes, so the first ~15 s of video is not tracked |
+| **Total pipeline start-up** | **~45–50 s** | every run | budget this before a demo — it is not a hang |
+| Webots world load | **~10–20 s** | every run | NAO + floor + contact properties |
+| IMU auto-zero calibration | **1.0 s** standing (`IMU_CALIBRATION_S`), 20 samples min | every episode | the robot must be standing with its feet loaded or tilt gates stay idle |
+| `pytest -q` (full suite) | **215 s (3.6 min)**, 575 tests | per change | `tests/test_controller_integration.py` dominates |
+| Fall → `simulationReset` → ready | **~2–3 s** | per fall | `FALL_CONFIRM_S` 1.0 s + reset + re-calibration |
 
 ---
 

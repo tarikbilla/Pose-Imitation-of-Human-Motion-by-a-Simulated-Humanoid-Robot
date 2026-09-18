@@ -434,13 +434,23 @@ not cyclic rather than looped on faith:
 
 | Field | `Forwards50.motion` | Meaning |
 |---|---|---|
-| `enter_s` | 0.72 s | playback starts here; the prepare-ramp does the opening squat instead, rate-limited and under balance supervision (worth 0.9 mm of travel) |
-| `loop_start_s` … `loop_end_s` | 1.80 → 2.84 s | rewound by `period_s` on reaching the end |
-| `period_s` | 1.04 s | one full stride, two stance exchanges |
-| `advance_m` | 0.093 m | → **0.089 m/s sustained** (forward kinematics) |
-| `exit_from_s` → `exit_to_s` | 2.24 → 5.32 s | the stop jump, taken on *crossing* that phase |
+| `enter_s` | 1.38 s | playback starts here; the prepare-ramp does the opening squat instead, rate-limited and under balance supervision |
+| `loop_start_s` … `loop_end_s` | 2.95 → 4.23 s | rewound by `period_s` on reaching the end |
+| `period_s` | 1.28 s | one full stride, two stance exchanges |
+| `advance_m` | 0.093 m | → **0.073 m/s sustained** (forward kinematics) |
+| `exit_from_s` → `exit_to_s` | 3.49 → 7.27 s | the stop jump, taken on *crossing* that phase |
 | `exit_cost_rad` | 0.0010 rad | 0.05 rad/s over one control step |
-| `tail_s` | 1.44 s | Cyberbotics' own feet-together deceleration |
+| `tail_s` | 2.46 s | Cyberbotics' whole feet-together deceleration |
+| `rest_s` | 8.45 s | where the tail has *actually* come to rest — see below |
+| `settle_s` | 1.18 s | `rest_s − exit_to_s`: the part of the tail that is really decelerating |
+| `stop_latency_s` | **2.46 s** | `period_s + settle_s`, the worst case from "stop" to standing |
+
+The last three are why stopping is not the whole 3.73 s the tail implies. After
+`rest_s` the clip commands no further travel — the remaining 1.28 s is it
+standing up out of its own walk crouch, a posture the lower-body layer has to
+ramp out of anyway the moment it gets the legs back. Riding that out bought
+nothing and cost 1.28 s of "the robot will not answer me" on every stop, so the
+tail is trimmed there (`tails_trimmed` in the trajectory log counts it).
 
 Two requirements keep this honest. The seam must be exact — 1 µrad, because a
 seam is a teleport executed in one 20 ms step with the caps lifted, and
@@ -462,11 +472,14 @@ the steps faster. It removes the start/stop transient between them, which is
 where the time was going. For a 10 s walk that is 47 stand/squat cycles reduced
 to 1.
 
-One recorded exceedance, for the record: `Forwards50.motion` asks 6.55 rad/s of
-the knees (102.3 % of the declared 6.40) in 5 of its 2028 joint-intervals, all
-at stance exchange. The cycled window plays exactly one of them per stride, at
-6.425 rad/s — a 0.001 rad lag every 1.04 s. Pinned by
-`test_the_cycled_window_stays_within_the_motors_declared_speed`.
+Motor headroom, for the record: across the clip's 2 376 joint-intervals
+**nothing exceeds the declared maximum**. The peak is `RKneePitch` at 83.5 % of
+its rated 6.40 rad/s, and inside the cycled window the peak is `LKneePitch` at
+82.0 %. Pinned by `test_the_cycled_window_stays_within_the_motors_declared_speed`.
+
+That 84 % is also the answer to "why is it only 0.073 m/s" — the clip is already
+near the motors' ceiling, so it cannot be retimed faster. Walking speed is
+hardware-bound here, not tuning-bound.
 
 If no clips are found on disk the controller says so in the log and falls back
 to the **march engine** (`gait.py`), which tracks your cadence, phase and stop

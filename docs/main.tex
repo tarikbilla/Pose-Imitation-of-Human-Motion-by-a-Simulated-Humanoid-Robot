@@ -72,9 +72,14 @@ robot's centre of mass, the camera supplies only the desired leg pose while the 
 forward-kinematics mass model decides how much is executable, with authority granted by the
 pose's symmetry rather than its magnitude. Locomotion plays pre-balanced motion clips entered
 through a travel-synchronised ramp and, where a clip contains a limit cycle, rewound at a seam
-measured at $0.0000$~rad, raising sustained walking speed from $0.036$ to $0.089$~m/s. The
-implementation is $21{,}794$ lines of Python, of which $7{,}433$ are tests. We report measured
-perception timings, stability outcomes from instrumented runs, and a Webots
+measured at $0.0000$~rad, raising sustained walking speed from $0.036$ to $0.073$~m/s. Turning
+is aimed rather than chained: pairing each certified stopping keyframe with the yaw delivered
+by then converts one coarse clip into a ladder of $104$ reachable angles, cutting a
+$90\degree$ turn from three clips to one and the mean residual heading error from $21.6\degree$
+to $3.9\degree$. The implementation is $28{,}496$ lines of Python, of which $9{,}535$ are tests,
+all $575$ passing. We report perception timings measured at $16.0$~FPS over $31{,}243$ recorded
+frames, locomotion outcomes derived from clip kinematics, an analysis of $8{,}153$~s of
+instrumented simulation that exposes a session-wide locomotion kill switch, and a Webots
 \texttt{InertialUnit} axis-masking defect that halves the reported torso pitch.
 \end{abstract}
 \vspace{1em}
@@ -116,8 +121,10 @@ Our contributions are: a metric-3D monocular front end whose tracked-box inferen
 and speed-adaptive filter together remove $70$~ms of fixed delay and add $32\%$ throughput; a
 closed-form retargeter invariant to subject heading; a single-commander leg arbiter with a
 symmetry-aware authority model; locomotion from pre-balanced clips made safe by a
-travel-proportional ramp and continuous by a measured limit-cycle rewind; and the diagnosis
-of a Webots \texttt{InertialUnit} defect that halves the reported torso pitch.
+travel-proportional ramp, continuous by a measured limit-cycle rewind and aimed by a ladder of
+certified stopping keyframes; a two-witness locomotion trigger that removes the dependence of
+the walk decision on a subject-specific travel threshold; and the diagnosis of a Webots
+\texttt{InertialUnit} defect that halves the reported torso pitch.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{System Architecture}
@@ -510,17 +517,23 @@ the static test are moving that fast.
 \textbf{Cyclic gait.} The clips are animations comprising squat, acceleration, stride,
 deceleration and stand; the stride is satisfactory and the surrounding transient is the cost.
 The middle of the long walk clip is a true limit cycle, with
-$\max_j |q_j(2.84\,\mathrm{s}) - q_j(1.80\,\mathrm{s})| = 0.0000$~rad over all twelve leg
-joints, and periodicity holding to that precision from $1.80$ to $5.32$~s. The segment can
-therefore be rewound with \texttt{setTime()} without commanding joint motion at the seam,
-making one clip a gait generator: a $1.04$~s stride advancing $0.093$~m, giving $0.089$~m/s
-sustained. The schedule is derived from the clip's keyframes at run time rather than tabulated,
+$\max_j |q_j(4.23\,\mathrm{s}) - q_j(2.95\,\mathrm{s})| = 0.0000$~rad over all twelve leg
+joints. The segment can therefore be rewound with \texttt{setTime()} without commanding joint
+motion at the seam, making one clip a gait generator: a $1.28$~s stride advancing $0.093$~m,
+giving $0.073$~m/s sustained. The schedule is derived from the clip's keyframes at run time rather than tabulated,
 so it cannot diverge from the shipped files, and a non-cyclic clip is detected rather than
 looped on assumption. The seam must be exact to one microradian, since it is a teleport
 executed in one step with the caps lifted, and the cycle must translate the robot by at least
 $0.02$~m, since looping a turn or side-step would rotate or drift it indefinitely. Cycling does
 not lengthen the stride; it removes the transient between strides, reducing a $10$~s walk from
 47 stand-squat cycles to one.
+
+\textbf{Trimming the tail.} Leaving the cycle jumps into the clip's own deceleration, but that
+tail is not uniformly deceleration. After $8.45$~s the clip commands no further travel and the
+remaining $1.28$~s merely returns the legs to a standing posture, which the pose layer has to
+undo the moment it regains them. Ending playback at the first certified keyframe past which no
+travel remains cuts the worst-case stop from $3.73$ to $2.46$~s without ever stopping the robot
+on momentum.
 
 \textbf{Heading servo.} Open-loop turning does not converge, because clip and human turn by
 different amounts and the error accumulates. The loop is closed on the robot's measured
@@ -532,6 +545,22 @@ the shipped value of exactly $0.5$ turned the robot from $+e$ to $-e$ indefinite
 each turn reduces the error to at most $0.54$ of its previous value. The watchdog budget must
 also derive from the clip's own duration without a ceiling, since \texttt{TurnLeft180} runs
 $9.0$~s and the default $8.0$~s cap guaranteed an overrun.
+
+\textbf{Aimed turning.} The overshoot rule above is correct for a clip played whole and wrong
+for one that can be stopped part-way, and treating every clip as atomic made turning both slow
+and coarse. The $40\degree$ clips spend roughly $60\%$ of their duration on their own start-stop
+transient and so sustain only $13.8\degree$/s, against $20.7\degree$/s for the $180\degree$
+clip; a $90\degree$ turn built from three of them pays that transient three times and settles
+twice between. Since \texttt{safe\_exit\_times} already certifies the keyframes at which
+playback may simply stop, and a stepping turn comes to rest at every footfall, pairing those
+keyframes with the yaw the clip has delivered by each of them --- recovered by the same
+stance-foot odometry used for translation --- yields a ladder of $104$ angles spaced at most
+$16\degree$ apart. The controller re-evaluates the live heading error each step and stops at the
+rung that minimises it, so the residual is bounded by half the spacing rather than by half a
+clip. Two further rules follow: a rotation already running keeps its clip, since swapping
+mid-turn costs a settle and a re-preparation; and the overshoot floor is retained for any clip
+that cannot be stopped part-way, where it prevents a limit cycle in which a $60\degree$ clip
+asked to correct $17\degree$ overshoots to $-43\degree$ and asks again.
 
 \textbf{Freeze resistance.} A clip owns the whole body, so anything preventing it from
 reporting completion would freeze the entire robot. A watchdog bounds suspension and retires
@@ -640,67 +669,169 @@ Turn & steps round the full circle & clip granularity \\
 \end{tabular}
 \end{table}
 
-On an RTX~3090~Ti, per-frame inference costs $75.9$~ms with full detection and $36.2$~ms with a
-tracked box, giving $16.0$~FPS end to end at a detection interval of 2. The 1\euro{} filter
-removed $70$~ms of constant group delay from the keypoint channel, and retargeting, smoothing
-and UDP transmission each cost below $1$~ms per frame. These are component measurements: full
-camera-to-actuation latency against the $150$~ms requirement has not been measured on the
-target machine and is not estimated here. Table~\ref{tab:results} collects the balance and
-locomotion outcomes.
+\subsection{Perception timing}
+
+Timings are from the target workstation (RTX~3090~Ti and RTX~3070, Python~3.12, Webots
+\texttt{basicTimeStep} $20$~ms). Per-frame inference costs $75.9$~ms when the person detector
+runs and $36.2$~ms on a tracked box, so at \texttt{detect\_interval}${}=2$ the mix averages
+$\approx 56$~ms. Measured over $31{,}243$ consecutively recorded frames with a subject in
+shot, the whole perception loop closes in $63$~ms at the median and $95$~ms at the 90th
+percentile, i.e.\ $16.0$~FPS sustained. Inference is therefore essentially the entire budget:
+the gait cue costs $0.030$~ms, the action cue $0.011$~ms, the 1\euro{} filter $0.022$~ms per
+axis, the arbiter $0.002$~ms and a UDP round trip $0.005$~ms, together under $0.1$~ms. One
+caveat for anyone repeating this: a frame containing no person returns in $42$~ms because the
+pose network is skipped, so benchmarking on blank input understates the cost by about a
+quarter.
+
+Summing independently measured stages gives $\approx 121$~ms from camera exposure to motor
+command for the arm and head channel: one $63$~ms frame period, up to one $20$~ms control step
+of quantisation, and $38$~ms of residual lag in the arm filter, whose time-constant-plus-lead
+formulation replaced a frame-rate-clocked exponential filter costing $108$~ms. This sits within
+the $150$~ms requirement at the median but not at the 90th percentile. It remains a sum of
+parts rather than a single stopwatch reading, because the controller logs its own control-step
+counter rather than the pipeline's frame index; adding that one field would make the
+end-to-end figure directly measurable and is the most valuable instrumentation still missing.
+
+\subsection{Locomotion}
+
+Table~\ref{tab:locomotion} reports the locomotion figures, all derived from the shipped clips'
+own keyframes through the forward-kinematic mass model rather than from a tabulated
+specification.
 
 \begin{table}[H]
 \centering
-\caption{Measured outcomes from instrumented simulation runs.}
-\label{tab:results}
+\caption{Locomotion, measured from clip kinematics.}
+\label{tab:locomotion}
 \small
-\begin{tabular}{@{}p{4.0cm}p{3.1cm}@{}}
+\begin{tabular}{@{}p{3.9cm}p{3.2cm}@{}}
 \toprule
 Quantity & Measured \\
 \midrule
-Longest continuous stand, IMU attitude & $298$\,s \\
-Stand with accelerometer attitude & fell in $\approx 2$\,s, $6/6$ \\
-Sustained walk speed, cyclic clip & $0.089$\,m/s \\
+Sustained walk speed, cyclic & $0.073$\,m/s \\
 Walk speed, chained clips & $0.036$\,m/s \\
-Limit-cycle seam error, 12 joints & $0.0000$\,rad \\
-Preparation ramp, sole attitude & $0.0000$\,rad (flat: $0.405$) \\
-Preparation ramp, support margin & $+0.0596$\,m (flat: $-0.064$) \\
-Planner in standing state & $83$--$86\%$ of decisions \\
+Stride period, advance & $1.28$\,s, $0.093$\,m \\
+Limit-cycle seam error & $0.0000$\,rad (12 joints) \\
+Peak commanded joint speed & $83.5\%$ of rated \\
+Stop latency, cyclic exit & $2.46$\,s (was $3.73$) \\
+Turn rate, aimed $180\degree$ clip & $20.7\degree$/s \\
+Turn rate, $40\degree$ clips chained & $13.8\degree$/s \\
+Turn $90\degree$ & $4.6$\,s, one clip, $1.1\degree$ residual \\
+Turn $180\degree$ & $8.5$\,s, one clip, $3.9\degree$ residual \\
+Smallest served heading error & $21\degree$ (was $26\degree$) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The implementation is $21{,}794$ lines of Python: $7{,}433$ of tests, $5{,}705$ of robot-side
-mathematics, $3{,}258$ of Webots controllers, $3{,}219$ of pipeline and $2{,}179$ of tooling.
-Because every robot-side library is simulator-independent, the control stack is testable
-without a Webots installation. The suite covers the leg solve as a round trip,
-self-calibration and cropped-feet lift detection, the step sequence and every safety gate,
-clip discovery and the overshoot guard, the centre-of-mass model and its spiral search, and a
+Two results deserve comment. First, walking speed is hardware-bound, not tuning-bound: across
+the clip's $2{,}376$ joint-intervals nothing exceeds the declared motor maximum, but the peak
+reaches $83.5\%$ of it, so the clip cannot be retimed faster without commanding speeds the
+motors cannot follow and desynchronising a dynamically balanced gait. Second, stop latency
+fell from $3.73$ to $2.46$~s once the clip's closing $1.28$~s was identified as a return to
+standing posture that commands no travel and that the pose layer must undo in any case; the
+deceleration proper occupies only $1.18$~s of the $2.46$~s tail.
+
+Aimed turning replaced clip chaining. Pairing each certified stopping keyframe with the yaw
+the clip has delivered by then converts \texttt{TurnLeft180} into a ladder of $104$ reachable
+angles spaced at most $16\degree$ apart, so a single clip stopped at the nearest rung bounds
+the residual heading error at $8\degree$, against $20\degree$ for playing the $40\degree$ clip
+whole. Replayed over eleven target headings, aimed turning reduced total time from $88.2$ to
+$51.5$~s, clips played from $24$ to $11$, and mean residual error from $21.6\degree$ to
+$3.9\degree$.
+
+\subsection{Session logs}
+
+Two instrumented sessions were recorded on 18~September, both at a real-time factor of $0.983$
+($20.3$~ms of wall clock per $20$~ms simulation step). The first, $191$~s with a subject
+tracked throughout, is the system behaving as designed: a motion clip owned the legs for
+$54.0\%$ of tracked steps, and during confident marching that rose to $84.8\%$, with the
+planner selecting a walk clip in $55.9\%$ of marching steps and a turn clip in $40.7\%$. Torso
+tilt stayed small (median $|\mathrm{roll}|$ $0.005$~rad, 99th percentile $0.087$) and the
+fore-aft support margin was negative in $2.0\%$ of steps.
+
+The second session exposed a defect that no per-frame metric would have surfaced, and it is the
+most consequential finding in the logs. At simulation time $21.1$~s the controller dropped all
+eleven clips for the remainder of the run. The cause is a session-wide kill switch: three
+consecutive failures retire locomotion entirely, and here a single preparation ramp toward
+\texttt{forward} failed to reach the clip's opening stance three times in succession, spending
+$7.94$~s in preparation before the third timeout disabled the layer. The run continued for a
+further $2.5$~hours --- still in progress when this analysis was taken --- during which
+$99.8\%$ of control steps executed with locomotion switched off and not one clip played. That
+period is therefore not evidence about locomotion at all. It also illustrates a second problem
+worth separating from the first: a subject was tracked in only $76$~s of that run, so the vast
+majority of the record is an unattended robot standing still, and session length is a poor
+proxy for evidence.
+
+Two design consequences follow from the kill switch. The backoff counts failures over a whole
+session with no decay, so three unlucky ramps minutes apart are indistinguishable from a
+genuinely broken clip set; and because each failure calls the abandon path, which clears the
+cumulative ramp clock, the $3.5$~s total-ramp ceiling intended to bound exactly this case can
+never accumulate across attempts. Both are recorded as open items.
+
+\subsection{The two-witness locomotion trigger}
+
+The action classifier commits to walking only once the pelvis has travelled $80$~mm within
+$0.8$~s, a threshold calibrated against one subject. A subject marching in place, or walking at
+$0.07$ to $0.10$~m/s, does not satisfy it and is reported as idle, whereupon the planner
+formerly returned an explicit stand without consulting the gait cue. The legs then fell through
+to per-leg pose imitation of a walking human, which is neither balanced nor intended, and is
+the mechanism behind the reported wobbling and falls. Replayed over the recorded session the
+gait cue observed the legs cycling for $59$~s while the planner answered ``standing still'' for
+$75\%$ of it.
+
+Treating the two cues as independent witnesses to one question --- either the pelvis travels or
+the legs cycle --- and letting the verdicts a cycling pair of legs contradicts yield to a
+confident march raised coverage of marching intervals by clip-driven walking from $12.5\%$ to
+$83\%$ on the 17~September session and from $30\%$ to $87\%$ on the 18~September session, while
+posture clips fired during marching fell from $6.1\%$ to $0.4\%$ and false walking on frames
+where the subject was demonstrably still remained at $0.0\%$. Walk intervals long enough to
+reach the clip's stride loop rose from $6$ to $24$. The verdict for an unobserved subject is
+deliberately exempt, since a gait cue retaining warm evidence would otherwise walk the robot at
+a human who has left the frame.
+
+\subsection{Implementation}
+
+The implementation is $28{,}496$ lines of Python: $9{,}535$ of tests, $8{,}023$ of robot-side
+mathematics, $4{,}176$ of pipeline, $3{,}864$ of Webots controllers and $2{,}889$ of tooling.
+Every robot-side library is simulator-independent, so the control stack is testable without a
+Webots installation. The suite covers the leg solve as a round trip, self-calibration and
+cropped-feet lift detection, the step sequence and every safety gate, clip discovery, the
+overshoot guard and the turn ladder, the centre-of-mass model and its spiral search, and a
 re-derivation of the IMU tilt signs from the sensor mounting that prevents silent regression.
 The integration suite exercises the real controller against a mocked Webots over real UDP,
-including leg arbitration, motion hand-off and freeze resistance.
-
-At the time of writing \texttt{pytest} collects 419 tests, of which 417 pass, one is skipped
-and one fails. The failure concerns the cyclic-clip exit phase of Section~6: with a synthetic
-cyclic clip the controller remains in its cycling state and does not reach the leaving state
-within the asserted window. It is recorded as a known open item and should be resolved before
-the cyclic-gait path is relied upon for an assessed demonstration.
+including leg arbitration, motion hand-off and freeze resistance. At the time of writing
+\texttt{pytest} collects and passes $575$ tests in $214$~s, with no failures or skips; the
+cyclic-clip exit defect reported in an earlier revision has been resolved.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \section{Limitations and Conclusions}
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 \texttt{ElbowYaw} and \texttt{WristYaw} remain at rest, so forearm twist is not imitated;
-recovering it requires hand landmarks \texttt{coco\_19} does not provide. Several results were
-derived analytically or from recorded logs rather than from a live GPU session, and three items
-warrant a first-run check on the target machine: the torso-yaw sign convention against real
-MeTRAbs output, end-to-end latency against the $150$~ms requirement, and whether the IMU pitch
-scale can be raised toward the analytically correct $2.0$. Locomotion remains clip-bounded,
-with stride length and turn granularity fixed by the shipped clips; an online gait generator or
-a learned policy~\cite{ze2025twist} would remove that quantisation, and the heading servo
-already accepts a continuous action. The accelerometer path wants a complementary or Kalman
-filter fusing gyro integration with gravity. Finally, a per-joint error study against fixed
-reference motions would convert the imitation-fidelity requirement from a target into a
-measurement; the logs and tooling for it already exist.
+recovering it requires hand landmarks \texttt{coco\_19} does not provide. Two defects found in
+the session logs are open. The locomotion backoff retires all clips after three failures
+counted over an entire session with no decay, so three unlucky preparation ramps minutes apart
+are indistinguishable from a broken clip set; it disabled locomotion $21$~s into a
+$8{,}077$~s run. The cumulative ramp ceiling intended to bound that case is cleared by the
+abandon path on every failure and therefore never accumulates. Both need a decaying counter and
+a clock that survives the abandon.
+
+Walking speed is now bounded by the robot rather than the software: the shipped clip peaks at
+$83.5\%$ of rated motor speed, so $0.073$~m/s cannot be improved by retiming. The turn clips
+run at only $52\%$ and do have headroom, but retiming a dynamically balanced clip cannot be
+validated by the quasi-static certifier, which already rejects the shipped clips, and so needs
+live testing. Removing the quantisation altogether wants an online gait generator or a learned
+policy~\cite{ze2025twist}; the heading servo already accepts a continuous action.
+
+End-to-end latency is still a sum of separately measured stages rather than one measurement,
+because the controller logs its own step counter instead of the pipeline's frame index. Two
+further items warrant a check on the target machine: the torso-yaw sign convention against real
+MeTRAbs output, and whether the IMU pitch scale can be raised toward the analytically correct
+$2.0$. The accelerometer path wants a complementary or Kalman filter fusing gyro integration
+with gravity. Finally, the action classifier's walk witnesses remain absolute speeds fitted to
+one subject; expressing them relative to the subject's own leg length and a noise floor learned
+at session start would remove the recalibration the two-witness trigger currently compensates
+for. A per-joint error study against fixed reference motions would convert the
+imitation-fidelity requirement from a target into a measurement; the logs and tooling exist.
 
 A simulated humanoid can be teleoperated convincingly from one RGB camera, provided the
 retargeted pose is treated as a request rather than a command. Three structural decisions

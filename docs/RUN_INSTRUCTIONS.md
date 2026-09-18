@@ -5,7 +5,7 @@ This guide shows how to run the project from both sides: the Python pipeline in 
 
 > **Environment**: Ubuntu 22.04 / 24.04, Python 3.12 in Conda env `py312`, TensorFlow + TensorFlow-Hub running [MeTRAbs](https://github.com/isarandi/metrabs) (installed via pip within conda), Webots R2024a
 >
-> **First run downloads the MeTRAbs model** (~320 MB) into `~/.cache/metrabs`;
+> **First run downloads the MeTRAbs model** (371 MB on disk) into `~/.cache/metrabs`;
 > set `$METRABS_CACHE_DIR` to put it elsewhere. It is deliberately *not* kept in
 > a temp directory, so a reboot does not throw it away.
 >
@@ -16,6 +16,50 @@ This guide shows how to run the project from both sides: the Python pipeline in 
 > the pipeline). The pretrained model weights are non-commercial-use only
 > (training-data license) -- see MeTRAbs'
 > [MODELS_6_DATASETS.md](https://github.com/isarandi/metrabs/blob/master/docs/MODELS_6_DATASETS.md).
+
+---
+
+## How long this takes
+
+Measured 2026-09-18 on the target PC (RTX 3090 Ti + RTX 3070, Python 3.12).
+Per-frame latency is in [`WORKFLOW.md`](WORKFLOW.md#latency-budget); this table
+is the wall-clock you actually wait through.
+
+### First-time setup — **~20–40 min**, mostly network
+
+| Step | Duration | Bounded by |
+|---|---|---|
+| 2.1 `conda create` | ~1–2 min | local |
+| 2.3 `conda env create -f environment.yml` | **~5–15 min** | download |
+| 2.4 `pip install tensorflow tensorflow-hub` | **~5–10 min** | download (~600 MB) |
+| 2.5 Verify TF sees the GPU | seconds | — |
+| 2.6 First model download (371 MB) | **~2–5 min** | download |
+| 5.1 Install Webots | ~5–10 min | download |
+
+### Every run — **~45–70 s before the robot tracks you**
+
+| Step | Duration | Note |
+|---|---|---|
+| MeTRAbs model load | **31 s** | cold load of the cached SavedModel |
+| TensorFlow graph warm-up | **15 s** | the first `estimate()` call |
+| Webots world load | ~10–20 s | in parallel if you use `make run` |
+| IMU auto-zero | 1.0 s standing | needs feet loaded, or the tilt gates stay idle |
+
+> **The first ~45 s is not a hang.** The OpenCV window opens *before* TensorFlow
+> finishes warming up, so the earliest frames are untracked and the robot will
+> not move. Wait for `Pose estimator: MeTRAbs (real human tracking active)`.
+
+### While running
+
+| Thing | Duration |
+|---|---|
+| Camera loop | **63 ms/frame p50 → 16 FPS** |
+| You move → motors move | **~121 ms** |
+| You start walking → robot starts | **~1.35 s** |
+| You stop walking → robot stops | **0.8–3.2 s** |
+| You turn 90° → robot has turned | **4.6 s** |
+| Fall → reset → ready again | ~2–3 s |
+| `pytest -q` (575 tests) | **3.6 min** |
 
 ---
 
@@ -81,12 +125,14 @@ conda activate py312
 ```
 
 ### 2.3 Install all dependencies from environment.yml
+*(~5–15 min, network-bound)*
 ```bash
 cd /home/<user>/CS_Group_C_2026/Pose-Imitation-of-Human-Motion-by-a-Simulated-Humanoid-Robot
 conda env create -f environment.yml -y
 ```
 
 ### 2.4 Install TensorFlow + TensorFlow-Hub via conda's pip (one-time)
+*(~5–10 min, ~600 MB download)*
 Install a TensorFlow build matching this machine's CUDA/cuDNN driver version
 (check with `nvidia-smi`, then see the
 [TensorFlow GPU install guide](https://www.tensorflow.org/install/pip) for the
@@ -109,6 +155,7 @@ the list is empty, the pipeline will refuse to start (see the GPU note above)
 -- fix the CUDA/cuDNN install before continuing.
 
 ### 2.6 First model download + skeleton check (one-time)
+*(~2–5 min: 371 MB download, then a ~31 s model load and a ~15 s warm-up)*
 The first run downloads and caches the MeTRAbs model (this can take a few
 minutes). Also confirms `src/perception/landmarks.py`'s joint-name mapping
 actually matches this model (see that file's docstring for why this matters):

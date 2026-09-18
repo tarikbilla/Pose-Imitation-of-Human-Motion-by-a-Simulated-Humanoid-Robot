@@ -69,13 +69,81 @@ python run.py --no-webots
 make run
 ```
 
-> **First run downloads the MeTRAbs model** (~320 MB) into `~/.cache/metrabs`
+### How long each step takes
+
+| Step | Duration | How often |
+|---|---|---|
+| 3. `pip install` / `conda env create` | **~5–15 min** | once per machine (network-bound) |
+| First run: MeTRAbs model download (371 MB) | **~2–5 min** | once per machine |
+| **Every** run: model load | **31 s** | each pipeline start |
+| **Every** run: TensorFlow graph warm-up | **15 s** | the first inference call |
+| **→ total start-up before tracking begins** | **~45–50 s** | budget this before a demo |
+| Webots world load | **~10–20 s** | each run |
+| `pytest -q` (575 tests) | **3.6 min** | per change |
+
+> **The first ~45 s is not a hang.** The OpenCV window opens before TensorFlow
+> has finished warming up, so early frames are untracked. Wait for
+> `Pose estimator: MeTRAbs (real human tracking active)` in the console.
+
+> **First run downloads the MeTRAbs model** (371 MB) into `~/.cache/metrabs`
 > (override with `$METRABS_CACHE_DIR`). It is kept there, not in a temp
 > directory, so a reboot does not throw it away.
 
 Press **`q`** or **`ESC`** in the window to quit.
 
 > Full setup guide: [`docs/RUN_INSTRUCTIONS.md`](docs/RUN_INSTRUCTIONS.md)
+
+---
+
+## Performance & Latency
+
+Measured 2026-09-18 on the target PC (RTX 3090 Ti + RTX 3070, Webots
+`basicTimeStep` 20 ms, `metrabs_eff2s_y4` at 1920×1080). Full per-stage
+breakdown and method: [`docs/WORKFLOW.md`](docs/WORKFLOW.md#latency-budget).
+
+**Two budgets, different causes — don't confuse them.**
+
+### 1. Motion latency — you move, the motors move: **~121 ms**
+
+| Stage | Library | p50 |
+|---|---|---|
+| **MeTRAbs inference + capture + overlay** | TensorFlow + TF-Hub, OpenCV | **~63 ms** (whole loop) |
+| Keypoint smoothing (3 axes) | `OneEuroFilter` | 0.07 ms |
+| Gait cue + action cue | in-repo | 0.04 ms |
+| UDP send → receive | `socket` + `json` | 0.005 ms |
+| Controller step quantisation | Webots | ≤20 ms |
+| Arm/head filter residual | `ArmTracker` | 38 ms |
+
+Whole-loop camera period, measured over **31 243 recorded frames with a real
+subject**: **63 ms p50 / 95 ms p90 → 16.0 FPS** effective, against a
+`runtime.latency_budget_ms` of 150 ms.
+
+Inference is essentially all of that 63 ms. Per-mode it costs **75.9 ms** when
+the YOLOv4 person detector runs and **36.2 ms** on a tracked box; at
+`pose.detect_interval: 2` the mix averages ~56 ms, and capture, overlay, cues,
+smoothing and UDP together add under 7 ms. *(A no-subject frame returns in
+~42 ms — detector only, pose network skipped — so don't benchmark on blank
+input.)*
+
+Everything that is not the GPU costs **0.1 ms combined**. If you want this
+faster, change `pose.model_url` to a smaller backbone; tuning anything else is
+tuning noise.
+
+### 2. Decision latency — you act, the robot commits to a clip: **seconds**
+
+A motion clip is a *commitment*: while it plays it owns the 12 leg joints, open
+loop. This is what people actually perceive as lag.
+
+| Event | Measured | Bounded by |
+|---|---|---|
+| Walk starts | **~1.35 s** | 790 ms cue + 560 ms prepare ramp |
+| Walk stops | **0.8 – 3.2 s** | 165 ms cue + 600 ms latch + ≤2.46 s clip |
+| Walk speed | **0.073 m/s** | motor-limited — the clip already peaks at 84% of rated speed |
+| Turn 90° | **4.6 s**, 1 clip, ±1.1° | the turn clip, at 20.7 °/s |
+| Turn 180° | **8.5 s**, 1 clip, ±3.9° | " |
+| Squat / one-leg / stance width | **~121 ms** | no clip — pose imitation is continuous |
+
+Webots realtime factor: **0.984** (20.3 ms wall per 20 ms step, over 5 725 s).
 
 ---
 
@@ -145,8 +213,12 @@ UDP 8765.
 ## Tests
 
 ```bash
-pytest -q
+pytest -q        # 575 tests, ~3.6 min
 ```
+
+`tests/test_controller_integration.py` dominates the runtime — it drives the
+real control loop against a fake Webots. For a fast inner loop while working on
+the locomotion maths, `pytest tests/test_walk_motion.py -q` runs in seconds.
 
 All the robot-side maths lives in `main/libraries/` and imports **no** Webots
 module, so it is fully unit-tested on a machine without Webots installed.
