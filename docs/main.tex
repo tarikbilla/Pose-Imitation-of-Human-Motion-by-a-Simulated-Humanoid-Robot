@@ -132,10 +132,10 @@ the walk decision on a subject-specific travel threshold; and the diagnosis of a
 \section{System Architecture}
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-The system runs as two processes joined by a datagram socket (Fig.~\ref{fig:arch}). The
-Python pipeline is a generic pose source handling capture, inference, filtering and gait
-statistics. The Webots controller owns all robot-specific concerns: joint axes, sign
-conventions, mechanical limits, balance and gait.
+Two processes joined by a datagram socket make up the system (Fig.~\ref{fig:arch}). On one
+side, a Python pipeline acts as a generic pose source, handling capture, inference, filtering
+and gait statistics. On the other, a Webots controller owns everything robot-specific: joint
+axes, sign conventions, mechanical limits, balance and gait.
 
 Two considerations fixed this boundary: Webots embeds its own Python interpreter, into which a
 CUDA-enabled TensorFlow build is difficult to install reliably; and driving the robot's full
@@ -148,7 +148,7 @@ Webots.
 \centering
 \begin{tikzpicture}[node distance=4.5mm]
   \node[blk, minimum width=18mm] (cam)  {Camera / video\\\scriptsize $1920\times1080$};
-  \node[blk, right=of cam, minimum width=18mm] (cap) {Capture $+$\\adaptive FPS\\\scriptsize 25--100\,Hz};
+  \node[blk, right=of cam, minimum width=18mm] (cap) {Capture $+$\\adaptive FPS\\\scriptsize 25 to 100\,Hz};
   \node[blk, right=of cap, minimum width=24mm] (pose) {MeTRAbs \texttt{eff2s\_y4}\\\scriptsize \texttt{coco\_19}, 19 landmarks\\\scriptsize absolute 3D, mm};
   \node[blk, right=of pose, minimum width=18mm] (filt) {speed-adaptive\\\scriptsize low-pass filter};
   \node[blk, right=of filt, minimum width=18mm] (gait) {Gait $+$ yaw cues\\\scriptsize cadence, phase,\\\scriptsize \texttt{body\_yaw\_rad}};
@@ -427,13 +427,13 @@ both feet, which indicates a jump or tracking failure but never a step.
 \centering
 \begin{tikzpicture}[node distance=3.2mm, every node/.style={font=\scriptsize}]
   \node[blk, text width=48mm] (dbl)
-       {\textbf{DOUBLE} --- symmetric crouch,\\the validated no-fall baseline};
+       {\textbf{DOUBLE}: symmetric crouch,\\the validated no-fall baseline};
   \node[acc, below=of dbl, text width=48mm] (load)
-       {\textbf{LOAD} --- lean until the centre\\of mass is over the stance foot};
+       {\textbf{LOAD}: lean until the centre\\of mass is over the stance foot};
   \node[blk, below=of load, text width=48mm] (gate)
        {stance margin $>0$~?\\forward kinematics with link\\masses, plus foot force sensors};
   \node[acc, below=of gate, text width=48mm] (sgl)
-       {\textbf{SINGLE} --- swing leg follows\\the human, authority from that margin};
+       {\textbf{SINGLE}: swing leg follows\\the human, authority from that margin};
   \draw[flow] (dbl) -- node[lbl, right=1pt] {foot raised} (load);
   \draw[flow] (load) -- (gate);
   \draw[flow] (gate) -- node[lbl, right=1pt] {pass} (sgl);
@@ -499,14 +499,14 @@ the velocity caps lifted, so direct handover would demand $0.84$~rad of knee tra
 $20$~ms step. The arbiter therefore ramps the legs to the clip's opening pose and starts
 playback only once the measured joints arrive. They must arrive \emph{together}: the knee
 travels $0.842$~rad, the hip $0.405$ and the ankle $0.437$, and sole attitude is their sum, so
-a single flat rate drives that sum to $0.405$~rad --- eight times the tilt budget --- and the
+a single flat rate drives that sum to $0.405$~rad, eight times the tilt budget, and the
 support margin to $-0.064$~m. Scaling each joint's rate by its share of the longest travel
 holds the sum at $0.0000$~rad and the margin at $+0.0596$~m in the same $0.56$~s. The return is
 a ramp too, seeded from the posture the clip leaves.
 
 \textbf{Exit policy.} A clip boundary is a balanced double-support pose, so playing the whole
-clip is the safe default --- but that makes clip length the latency of stopping and pays the
-start-stop transient on every stride. That transient is $49\%$ of \texttt{Forwards.motion}'s
+clip is the safe default. The cost is that clip length becomes the latency of stopping, and
+that every stride pays the start-stop transient. That transient is $49\%$ of \texttt{Forwards.motion}'s
 $2.60$~s, and the closing settle carries the torso $17$~mm backward, which is why chained clips
 measured $0.036$~m/s against a documented $0.10$~m/s. Three exits exist, in order of
 preference: leaving a detectable gait cycle, stopping at a certified keyframe, and the tilt
@@ -516,9 +516,10 @@ of the centre of mass with $\omega \approx 5.9$~rad/s at this crouch, so $0.18$~
 $30$~mm past, against a $40$ to $60$~mm budget. Thirteen of the $46$ statically acceptable
 poses are moving that fast.
 
-\textbf{Cyclic gait.} The clips are animations --- squat, acceleration, stride, deceleration,
-stand --- in which the stride is satisfactory and the surrounding transient is the cost. The
-middle of the long walk clip is a true limit cycle, with
+\textbf{Cyclic gait.} Each clip is an animation comprising a squat, an acceleration, some
+strides, a deceleration and a stand. Within it, the stride itself is satisfactory; what costs
+is the transient around it. Inspection shows the middle of the long walk clip to be a true
+limit cycle, with
 $\max_j |q_j(4.23\,\mathrm{s}) - q_j(2.95\,\mathrm{s})| = 0.0000$~rad over all twelve leg
 joints. The segment can therefore be rewound with \texttt{setTime()} without commanding joint
 motion at the seam, making one clip a gait generator: a $1.28$~s stride advancing $0.093$~m,
@@ -555,9 +556,9 @@ transient and so sustain only $13.8\degree$/s, against $20.7\degree$/s for the $
 clip; a $90\degree$ turn built from three of them pays that transient three times and settles
 twice between. Since \texttt{safe\_exit\_times} already certifies the keyframes at which
 playback may simply stop, and a stepping turn comes to rest at every footfall, pairing those
-keyframes with the yaw the clip has delivered by each of them --- recovered by the same
-stance-foot odometry used for translation --- yields a ladder of $104$ angles spaced at most
-$16\degree$ apart. The controller re-evaluates the live heading error each step and stops at the
+keyframes with the yaw the clip has delivered by each of them, recovered by the same
+stance-foot odometry already used for translation, yields a ladder of $104$ angles spaced at
+most $16\degree$ apart. The controller re-evaluates the live heading error each step and stops at the
 rung that minimises it, so the residual is bounded by half the spacing rather than by half a
 clip. Two further rules follow: a rotation already running keeps its clip, since swapping
 mid-turn costs a settle and a re-preparation; and the overshoot floor is retained for any clip
@@ -635,7 +636,7 @@ independent measurement of the half-scale pitch.
 
 \subsection{Automated log analysis}
 
-The significant failures in this project are statistical, such as a head pinned for $40\%$ of
+Failures in this project are statistical, such as a head pinned for $40\%$ of
 frames or a support margin negative for $80\%$ of a run, and none is apparent from watching the
 robot. An analyser of approximately $1{,}100$ lines reads each run's trajectory CSV and emits a
 severity-ranked list of findings. Each of its twenty checks corresponds to a defect that
@@ -782,7 +783,7 @@ eleven clips for the remainder of the run. The cause is a session-wide kill swit
 consecutive failures retire locomotion entirely, and here a single preparation ramp toward
 \texttt{forward} failed to reach the clip's opening stance three times in succession, spending
 $7.94$~s in preparation before the third timeout disabled the layer. The run continued for a
-further $2.5$~hours --- still in progress when this analysis was taken --- during which
+further $2.5$~hours, and was still in progress when this analysis was taken. Throughout it,
 $99.8\%$ of control steps executed with locomotion switched off and not one clip played. That
 period is therefore not evidence about locomotion at all. It also illustrates a second problem
 worth separating from the first: a subject was tracked in only $76$~s of that run, so the vast
@@ -806,9 +807,9 @@ the mechanism behind the reported wobbling and falls. Replayed over the recorded
 gait cue observed the legs cycling for $59$~s while the planner answered ``standing still'' for
 $75\%$ of it.
 
-Treating the two cues as independent witnesses to one question --- either the pelvis travels or
-the legs cycle --- and letting the verdicts a cycling pair of legs contradicts yield to a
-confident march raised coverage of marching intervals by clip-driven walking from $12.5\%$ to
+The two cues are better treated as independent witnesses to a single question: either the
+pelvis travels, or the legs cycle. Letting the verdicts that a cycling pair of legs contradicts
+yield to a confident march raised coverage of marching intervals by clip-driven walking from $12.5\%$ to
 $83\%$ on the 17~September session and from $30\%$ to $87\%$ on the 18~September session, while
 posture clips fired during marching fell from $6.1\%$ to $0.4\%$ and false walking on frames
 where the subject was demonstrably still remained at $0.0\%$. Walk intervals long enough to
@@ -834,8 +835,8 @@ cyclic-clip exit defect reported in an earlier revision has been resolved.
 \section{Limitations and Conclusions}
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-Scope is bounded first by what the robot may attempt. Aerial and highly dynamic motion ---
-flips, jumps, running --- is excluded by construction: every leg command passes a quasi-static
+Scope is bounded first by what the robot may attempt. Aerial and highly dynamic motion such
+as flips, jumps and running is excluded by construction: every leg command passes a quasi-static
 centre-of-mass test that presumes continuous ground contact, and the simultaneous absence of
 both feet is treated as a tracking failure rather than a manoeuvre. Backward locomotion is
 weaker than forward: \texttt{Backwards.motion} contains no detectable limit cycle, so unlike
@@ -884,10 +885,10 @@ whole recorded sessions, whether it held.
 \section*{Acknowledgments}
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-The authors thank M.Sc.~Severin Stahl and Prof.~Dr.-Ing.~Hartmut Weber (THM, Campus
-Friedberg, IEM) for supervising this project and for guidance on scope, requirements and
-evaluation methodology. The work was carried out as Group~C's project for the CSPM 2026S
-course. The authors declare no conflicts of interest.
+We thank M.Sc.~Severin Stahl and Prof.~Dr.-Ing.~Hartmut Weber (THM, Campus Friedberg, IEM)
+for supervising this project and for guidance on scope, requirements and evaluation
+methodology. This work was carried out as Group~C's project for the CSPM 2026S course. The
+authors declare no conflicts of interest.
 
 \textbf{Author contributions.} Tarik Billa designed the system architecture and process split
 and implemented the perception pipeline, retargeting mathematics, leg-control arbiter, balance
